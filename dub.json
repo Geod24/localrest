@@ -1,0 +1,12 @@
+{
+	"name": "localrest",
+	"description": "A library to allow integration testing of vibe.web.rest based code",
+	"license": "MIT",
+	"authors": [
+		"Mathias 'Geod24' Lang"
+	],
+	"copyright": "Copyright © 2019, Mathias 'Geod24' Lang",
+	"dependencies": {
+		"vibe-d:data": "~>0.8.4"
+	}
+}
