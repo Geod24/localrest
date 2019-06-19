@@ -308,7 +308,7 @@ unittest
             std.concurrency.register(name, ret.tid());
             return ret;
         default:
-            assert(0);
+            assert(0, type);
         }
     }
 
