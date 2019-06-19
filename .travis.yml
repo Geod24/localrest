@@ -1,0 +1,30 @@
+language: d
+
+# Trusty is Travis' default but reached EOL 2019-04-30
+dist: xenial
+
+branches:
+  only:
+    - /^v\d+\.(x|[\d]+)\.(x|[\d]+)([-|\+](\S+))?$/
+
+os:
+  - linux
+  - osx
+
+d:
+  - dmd
+  - ldc
+  - dmd-2.085.1
+  - ldc-1.14.0
+
+# Latest version of DMD/GDC/LDC
+matrix:
+  include:
+    - os: linux
+      addons:
+        apt:
+          sources:
+            - ubuntu-toolchain-r-test
+          packages:
+            - gdc-9
+      env: DC=gdc
