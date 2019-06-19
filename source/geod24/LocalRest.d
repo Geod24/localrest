@@ -315,7 +315,7 @@ unittest
     auto node1 = factory("normal", 1);
     auto node2 = factory("byzantine", 2);
 
-    static void testFunc()
+    static void testFunc(Tid parent)
     {
         auto node1 = factory("this does not matter", 1);
         auto node2 = factory("neither does this", 2);
@@ -329,7 +329,10 @@ unittest
         node1.recv(Json.init);
         assert(node1.last() == "recv@1");
         assert(node2.last() == "pubkey");
+        parent.send(42);
     }
 
-    auto testerFiber = spawn(&testFunc);
+    auto testerFiber = spawn(&testFunc, thisTid);
+    // Make sure our main thread terminates after everyone else
+    receiveOnly!int();
 }
