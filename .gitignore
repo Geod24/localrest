@@ -24,3 +24,6 @@ dub.selections.json
 
 # Code coverage
 *.lst
+
+# Emacs
+*~
