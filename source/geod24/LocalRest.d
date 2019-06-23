@@ -1,8 +1,8 @@
 /*******************************************************************************
 
-    Provides utilities to moch an async REST node on the network
+    Provides utilities to mock an async REST node in unittests
 
-    Using `vibe.web.rest` allow to cleanly separate business code
+    Using `vibe.web.rest` allows to cleanly separate business code
     from network code, as implementing an interface is all that's
     needed to create a server.
 
