@@ -72,13 +72,62 @@ private struct ArgWrapper (T...)
     T args;
 }
 
-/// Ditto
-public final class RemoteAPI (API, Implementation : API) : API
+/*******************************************************************************
+
+    A reference to an alread-instantiated node
+
+    This class serves the same purpose as a `RestInterfaceClient`:
+    it is a client for an already instantiated rest `API` interface.
+
+    In order to instantiate a new server (in a remote thread), use the static
+    `spawn` function.
+
+    Params:
+      API = The interface defining the API to implement
+
+*******************************************************************************/
+
+public final class RemoteAPI (API) : API
 {
-    static if (is(typeof(Implementation.__ctor)))
-        private alias CtorParams = Parameters!(Implementation.__ctor);
-    else
-        private alias CtorParams = AliasSeq!();
+    /***************************************************************************
+
+        Instantiate a node and start it
+
+        This is usually called from the main thread, which will start all the
+        nodes and then start to process request.
+        In order to have a connected network, no nodes in any thread should have
+        a different reference to the same node.
+        In practice, this means there should only be one `Tid` per "address".
+
+        Note:
+          When the `RemoteAPI` returned by this function is finalized,
+          the child thread will be shut down.
+          This ownership mechanism should be replaced with reference counting
+          in a later version.
+
+        Params:
+          Impl = Type of the implementation to instantiate
+          args = Arguments to the object's constructor
+
+        Returns:
+          A `RemoteAPI` owning the node reference
+
+    ***************************************************************************/
+
+    public static RemoteAPI!(API) spawn (Impl) (CtorParams!Impl args)
+    {
+        auto childTid = .spawn(&spawned!(Impl), args);
+        return new RemoteAPI(childTid, true);
+    }
+
+    /// Helper template to get the constructor's parameters
+    private static template CtorParams (Impl)
+    {
+        static if (is(typeof(Impl.__ctor)))
+            private alias CtorParams = Parameters!(Impl.__ctor);
+        else
+            private alias CtorParams = AliasSeq!();
+    }
 
     /***************************************************************************
 
@@ -91,11 +140,12 @@ public final class RemoteAPI (API, Implementation : API) : API
        `std.concurrency.receive` is not `@safe`, so neither is this.
 
        Params:
+           Implementation = Type of the implementation to instantiate
            args = Arguments to `Implementation`'s constructor
 
     ***************************************************************************/
 
-    private static void spawned (CtorParams...) (CtorParams cargs)
+    private static void spawned (Implementation) (CtorParams!Implementation cargs)
     {
         import std.format;
 
@@ -149,45 +199,32 @@ public final class RemoteAPI (API, Implementation : API) : API
     /// Whether or not the destructor should destroy the thread
     private bool owner;
 
-    /***************************************************************************
-
-        Instantiate a node node and start it
-
-        This is usually called from the main thread, which will start all the
-        nodes and then start to process request.
-        In order to have a connected network, no nodes in any thread should have
-        a different reference to the same node.
-        In practice, this means there should only be one `Tid` per `Hash`.
-
-        When this class is finalized, the child thread will be shut down.
-
-        Params:
-          args = Arguments to the object's constructor
-
-    ***************************************************************************/
-
-    public this (CtorParams...) (CtorParams args)
-    {
-        this.childTid = spawn(&spawned!(CtorParams), args);
-        this.owner = true;
-    }
-
     // Vibe.d mandates that method must be @safe
     @safe:
 
     /***************************************************************************
 
-        Create a reference to an already existing Tid
+        Create an instante of a client
 
-        This overload should be used by non-main Threads to get a reference
-        to an already instantiated Node.
+        This connects to an already instantiated node.
+        In order to instantiate a node, see the static `spawn` function.
+
+        Params:
+          tid = `std.concurrency.Tid` of the node.
+                This can usually be obtained by `std.concurrency.locate`.
 
     ***************************************************************************/
 
     public this (Tid tid) @nogc pure nothrow
     {
+        this(tid, false);
+    }
+
+    /// Private overload used by `spawn`
+    private this (Tid tid, bool isOwner) @nogc pure nothrow
+    {
         this.childTid = tid;
-        this.owner = false;
+        this.owner = isOwner;
     }
 
     public Tid tid () @nogc pure nothrow
@@ -250,7 +287,7 @@ unittest
         { assert(0); }
     }
 
-    scope test = new RemoteAPI!(API, MockAPI)();
+    scope test = RemoteAPI!API.spawn!MockAPI();
     assert(test.pubkey() == 42);
 }
 
@@ -295,16 +332,16 @@ unittest
         const name = hash.to!string;
         auto tid = std.concurrency.locate(name);
         if (tid != tid.init)
-            return new RemoteAPI!(API, Node)(tid);
+            return new RemoteAPI!API(tid);
 
         switch (type)
         {
         case "normal":
-            auto ret =  new RemoteAPI!(API, Node)(false);
+            auto ret =  RemoteAPI!API.spawn!Node(false);
             std.concurrency.register(name, ret.tid());
             return ret;
         case "byzantine":
-            auto ret =  new RemoteAPI!(API, Node)(true);
+            auto ret =  RemoteAPI!API.spawn!Node(true);
             std.concurrency.register(name, ret.tid());
             return ret;
         default:
@@ -335,4 +372,78 @@ unittest
     auto testerFiber = spawn(&testFunc, thisTid);
     // Make sure our main thread terminates after everyone else
     receiveOnly!int();
+}
+
+/// This network have different types of nodes in it
+unittest
+{
+    static interface API
+    {
+        @safe:
+        public @property ulong requests ();
+        public @property ulong value ();
+    }
+
+    static class MasterNode : API
+    {
+        @safe:
+        public override @property ulong requests()
+        {
+            return this.requests_;
+        }
+
+        public override @property ulong value()
+        {
+            this.requests_++;
+            return 42; // Of course
+        }
+
+        private ulong requests_;
+    }
+
+    static class SlaveNode : API
+    {
+        @safe:
+        this(Tid masterTid)
+        {
+            this.master = new RemoteAPI!API(masterTid);
+        }
+
+        public override @property ulong requests()
+        {
+            return this.requests_;
+        }
+
+        public override @property ulong value()
+        {
+            this.requests_++;
+            return master.value();
+        }
+
+        private API master;
+        private ulong requests_;
+    }
+
+    API[4] nodes;
+    auto master = RemoteAPI!API.spawn!MasterNode();
+    nodes[0] = master;
+    nodes[1] = RemoteAPI!API.spawn!SlaveNode(master.tid());
+    nodes[2] = RemoteAPI!API.spawn!SlaveNode(master.tid());
+    nodes[3] = RemoteAPI!API.spawn!SlaveNode(master.tid());
+
+    foreach (n; nodes)
+    {
+        assert(n.requests() == 0);
+        assert(n.value() == 42);
+    }
+
+    assert(nodes[0].requests() == 4);
+
+    foreach (n; nodes[1 .. $])
+    {
+        assert(n.value() == 42);
+        assert(n.requests() == 2);
+    }
+
+    assert(nodes[0].requests() == 7);
 }
