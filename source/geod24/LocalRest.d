@@ -95,12 +95,12 @@ public final class RemoteAPI (API, Implementation : API) : API
 
     ***************************************************************************/
 
-    private static void spawned (CtorParams...) (CtorParams args)
+    private static void spawned (CtorParams...) (CtorParams cargs)
     {
         import std.format;
 
         bool terminated = false;
-        scope node = new Implementation(args);
+        scope node = new Implementation(cargs);
 
         scope handler = (Command cmd) {
             SWITCH:
