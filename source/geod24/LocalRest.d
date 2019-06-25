@@ -129,6 +129,51 @@ public final class RemoteAPI (API) : API
             private alias CtorParams = AliasSeq!();
     }
 
+    ///
+    private static void handleCommand (Command cmd, API node)
+    {
+        import std.format;
+
+        switch (cmd.method)
+        {
+            foreach (member; __traits(allMembers, API))
+            foreach (ovrld; __traits(getOverloads, API, member))
+            {
+                mixin(
+                q{
+                    case `%2$s`:
+                    alias Method = ovrld;
+                    try
+                    {
+                        auto args = cmd.args.deserializeJson!(ArgWrapper!(Parameters!ovrld));
+
+                        static if (!is(ReturnType!ovrld == void))
+                        {
+                            cmd.sender.send(
+                                Response(
+                                    true,
+                                    node.%1$s(args.args).serializeToJsonString()));
+                        }
+                        else
+                        {
+                            node.%1$s(args.args);
+                            cmd.sender.send(Response(true));
+                        }
+                    }
+                    catch (Throwable t)
+                    {
+                        // Our sender expects a response
+                        cmd.sender.send(Response(false, t.toString()));
+                    }
+
+                    return;
+                }.format(member, ovrld.mangleof));
+            }
+        default:
+            assert(0, "Unmatched method name: " ~ cmd.method);
+        }
+    }
+
     /***************************************************************************
 
         Main dispatch function
@@ -152,44 +197,10 @@ public final class RemoteAPI (API) : API
         bool terminated = false;
         scope node = new Implementation(cargs);
 
-        scope handler = (Command cmd) {
-            SWITCH:
-                switch (cmd.method)
-                {
-                    foreach (member; __traits(allMembers, API))
-                        foreach (ovrld; __traits(getOverloads, API, member))
-                        {
-                            mixin(q{
-                                    case `%2$s`:
-                                    alias Method = ovrld;
-                                    try {
-                                        auto args = cmd.args.deserializeJson!(
-                                            ArgWrapper!(Parameters!ovrld));
-                                        static if (!is(ReturnType!ovrld == void)) {
-                                            cmd.sender.send(
-                                                Response(
-                                                    true,
-                                                    node.%1$s(args.args).serializeToJsonString()));
-                                        } else {
-                                            node.%1$s(args.args);
-                                            cmd.sender.send(Response(true));
-                                        }
-                                    } catch (Throwable t) {
-                                        // Our sender expects a response
-                                        cmd.sender.send(Response(false, t.toString()));
-                                    }
-                                    break SWITCH;
-                                }.format(member, ovrld.mangleof));
-                        }
-                default:
-                    assert(0, "Unmatched method name: " ~ cmd.method);
-                }
-            };
-
         while (!terminated)
         {
             receive((OwnerTerminated e) { terminated = true; },
-                    handler);
+                    (Command cmd)       { handleCommand(cmd, node); });
         }
     }
 
