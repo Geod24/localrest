@@ -48,6 +48,10 @@ private struct Command
 {
     /// Tid of the sender thread (cannot be JSON serialized)
     C.Tid sender;
+    /// In order to support re-entrancy, every request contains an id
+    /// which should be copied in the `Response`
+    /// Initialized to `size_t.max` so not setting it crashes the program
+    size_t id = size_t.max;
     /// Method to call
     string method;
     /// Arguments to the method, JSON formatted
@@ -60,6 +64,11 @@ private struct Response
     /// `true` if the method returned successfully,
     /// `false` if an `Exception` occured
     bool success;
+    /// In order to support re-entrancy, every request contains an id
+    /// which should be copied in the `Response` so the scheduler can
+    /// properly dispatch this event
+    /// Initialized to `size_t.max` so not setting it crashes the program
+    size_t id;
     /// If `success == true`, the JSON-serialized return value.
     /// Otherwise, it contains `Exception.toString()`.
     string data;
@@ -71,6 +80,101 @@ private struct ArgWrapper (T...)
 {
     T args;
 }
+
+/// Our own little scheduler
+private final class LocalScheduler : C.FiberScheduler
+{
+    import core.sync.condition;
+    import core.sync.mutex;
+
+    /// Just a FiberCondition with a state
+    private struct Waiting { FiberCondition c; bool busy; }
+
+    /// The 'Response' we are currently processing, if any
+    private Response pending;
+    /// List of Condition for blocked queries
+    /// Some entries might be empty (we never size it down)
+    private Waiting[] waiting;
+
+    /// Should never be called from outside
+    public override Condition newCondition(Mutex m = null) nothrow
+    {
+        assert(0);
+    }
+
+    /// Get the next available request ID
+    public size_t getNextResponseId ()
+    {
+        // Try to find one in the array
+        foreach (idx, ref val; this.waiting)
+            if (!val.busy)
+                return idx;
+        return this.waiting.length;
+    }
+
+    public Response waitResponse (size_t id) nothrow
+    {
+        if (id == this.waiting.length)
+            this.waiting ~= Waiting(new FiberCondition, false);
+        else if (id > this.waiting.length)
+            assert(0, "This should never happend");
+
+        Waiting* ptr = &this.waiting[id];
+        if (ptr.busy)
+            assert(0, "Trying to override a pending request");
+
+        // We yield and wait for an answer
+        ptr.busy = true;
+        ptr.c.wait();
+        ptr.busy = false;
+        // After control returns to us, `pending` has been filled
+        scope(exit) this.pending = Response.init;
+        return this.pending;
+    }
+
+    /// Override `FiberScheduler.FiberCondition` to avoid mutexes
+    /// and usage of global state
+    private class FiberCondition : Condition
+    {
+        this() nothrow
+        {
+            super(null);
+            notified = false;
+        }
+
+        override void wait() nothrow
+        {
+            scope (exit) notified = false;
+            while (!notified)
+                this.outer.yield();
+        }
+
+        override bool wait(Duration period) nothrow
+        {
+            assert(0); // Unused
+        }
+
+        override void notify() nothrow
+        {
+            notified = true;
+            this.outer.yield();
+        }
+
+        override void notifyAll() nothrow
+        {
+            notified = true;
+            this.outer.yield();
+        }
+
+        private bool notified;
+    }
+}
+
+
+/// We need a scheduler to simulate an event loop and to be re-entrant
+/// However, the one in `std.concurrency` is process-global (`__gshared`)
+private LocalScheduler scheduler;
+
 
 /*******************************************************************************
 
@@ -152,18 +256,19 @@ public final class RemoteAPI (API) : API
                             C.send(cmd.sender,
                                 Response(
                                     true,
+                                    cmd.id,
                                     node.%1$s(args.args).serializeToJsonString()));
                         }
                         else
                         {
                             node.%1$s(args.args);
-                            C.send(cmd.sender, Response(true));
+                            C.send(cmd.sender, Response(true, cmd.id));
                         }
                     }
                     catch (Throwable t)
                     {
                         // Our sender expects a response
-                        C.send(cmd.sender, Response(false, t.toString()));
+                        C.send(cmd.sender, Response(false, cmd.id, t.toString()));
                     }
 
                     return;
@@ -192,16 +297,22 @@ public final class RemoteAPI (API) : API
 
     private static void spawned (Implementation) (CtorParams!Implementation cargs)
     {
-        import std.format;
-
-        bool terminated = false;
         scope node = new Implementation(cargs);
+        scheduler = new LocalScheduler;
 
-        while (!terminated)
-        {
-            C.receive((C.OwnerTerminated e) { terminated = true; },
-                      (Command cmd)         { handleCommand(cmd, node); });
-        }
+        scheduler.start(() {
+                bool terminated = false;
+                while (!terminated)
+                {
+                    C.receive(
+                        (C.OwnerTerminated e) { terminated = true; },
+                        (Response res) {
+                            scheduler.pending = res;
+                            scheduler.waiting[res.id].c.notify();
+                        },
+                        (Command cmd) { scheduler.spawn(() => handleCommand(cmd, node)); });
+                }
+            });
     }
 
     /// Where to send message to
@@ -446,6 +557,54 @@ unittest
     assert(nodes[0].requests() == 7);
 }
 
+/// Support for circular nodes call
+unittest
+{
+    static import std.concurrency;
+    import std.format;
+
+    __gshared C.Tid[string] tbn;
+
+    static interface API
+    {
+        @safe:
+        public ulong call (ulong count, ulong val);
+        public void setNext (string name);
+    }
+
+    static class Node : API
+    {
+        @safe:
+        public override ulong call (ulong count, ulong val)
+        {
+            if (!count)
+                return val;
+            return this.next.call(count - 1, val + count);
+        }
+
+        public override void setNext (string name) @trusted
+        {
+            this.next = new RemoteAPI!API(tbn[name]);
+        }
+
+        private API next;
+    }
+
+    RemoteAPI!(API)[3] nodes = [
+        RemoteAPI!API.spawn!Node(),
+        RemoteAPI!API.spawn!Node(),
+        RemoteAPI!API.spawn!Node(),
+    ];
+
+    foreach (idx, ref api; nodes)
+        tbn[format("node%d", idx)] = api.tid();
+    nodes[0].setNext("node1");
+    nodes[1].setNext("node2");
+    nodes[2].setNext("node0");
+
+    // 7 level of re-entrancy
+    assert(210 == nodes[0].call(20, 0));
+}
 
 /*******************************************************************************
 
@@ -522,19 +681,28 @@ private template GenerateOverload (alias ovrld)
     mixin(q{
             override ReturnType!(ovrld) } ~ __traits(identifier, ovrld) ~ q{ (Parameters!ovrld params)
             {
-                auto serialized = ArgWrapper!(Parameters!ovrld)(params)
-                    .serializeToJsonString();
-                auto command = Command(C.thisTid(), ovrld.mangleof, serialized);
-                // `std.concurrency.send/receive[Only]` is not `@safe` but
-                // this overload needs to be
-                auto res = () @trusted {
-                    C.send(this.childTid, command);
-                    return C.receiveOnly!(Response);
-                }();
-                if (!res.success)
-                    throw new Exception(res.data);
-                static if (!is(ReturnType!(ovrld) == void))
-                    return res.data.deserializeJson!(typeof(return));
+                    auto serialized = ArgWrapper!(Parameters!ovrld)(params)
+                        .serializeToJsonString();
+                    auto command = Command(C.thisTid(), size_t.max, ovrld.mangleof, serialized);
+                    // `std.concurrency.send/receive[Only]` is not `@safe` but
+                    // this overload needs to be
+                    auto res = () @trusted {
+                        // We're in the main thread / client, no re-entrancy,
+                        // and no scheduler in sight, so KISS
+                        if (scheduler is null) {
+                            C.send(this.childTid, command);
+                            return C.receiveOnly!(Response);
+                        }
+                        // Scheduler / re-entrant path
+                        command.id = scheduler.getNextResponseId();
+                        C.send(this.childTid, command);
+                        auto res = scheduler.waitResponse(command.id);
+                        return res;
+                    }();
+                    if (!res.success)
+                        throw new Exception(res.data);
+                    static if (!is(ReturnType!(ovrld) == void))
+                        return res.data.deserializeJson!(typeof(return));
             }
         });
 }
