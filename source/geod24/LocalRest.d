@@ -39,7 +39,7 @@ module geod24.LocalRest;
 
 import vibe.data.json;
 
-import std.concurrency;
+static import C = std.concurrency;
 import std.meta : AliasSeq;
 import std.traits : Parameters, ReturnType;
 
@@ -47,7 +47,7 @@ import std.traits : Parameters, ReturnType;
 private struct Command
 {
     /// Tid of the sender thread (cannot be JSON serialized)
-    Tid sender;
+    C.Tid sender;
     /// Method to call
     string method;
     /// Arguments to the method, JSON formatted
@@ -116,7 +116,7 @@ public final class RemoteAPI (API) : API
 
     public static RemoteAPI!(API) spawn (Impl) (CtorParams!Impl args)
     {
-        auto childTid = .spawn(&spawned!(Impl), args);
+        auto childTid = C.spawn(&spawned!(Impl), args);
         return new RemoteAPI(childTid, true);
     }
 
@@ -149,7 +149,7 @@ public final class RemoteAPI (API) : API
 
                         static if (!is(ReturnType!ovrld == void))
                         {
-                            cmd.sender.send(
+                            C.send(cmd.sender,
                                 Response(
                                     true,
                                     node.%1$s(args.args).serializeToJsonString()));
@@ -157,13 +157,13 @@ public final class RemoteAPI (API) : API
                         else
                         {
                             node.%1$s(args.args);
-                            cmd.sender.send(Response(true));
+                            C.send(cmd.sender, Response(true));
                         }
                     }
                     catch (Throwable t)
                     {
                         // Our sender expects a response
-                        cmd.sender.send(Response(false, t.toString()));
+                        C.send(cmd.sender, Response(false, t.toString()));
                     }
 
                     return;
@@ -199,13 +199,13 @@ public final class RemoteAPI (API) : API
 
         while (!terminated)
         {
-            receive((OwnerTerminated e) { terminated = true; },
-                    (Command cmd)       { handleCommand(cmd, node); });
+            C.receive((C.OwnerTerminated e) { terminated = true; },
+                      (Command cmd)         { handleCommand(cmd, node); });
         }
     }
 
     /// Where to send message to
-    private Tid childTid;
+    private C.Tid childTid;
 
     /// Whether or not the destructor should destroy the thread
     private bool owner;
@@ -226,19 +226,19 @@ public final class RemoteAPI (API) : API
 
     ***************************************************************************/
 
-    public this (Tid tid) @nogc pure nothrow
+    public this (C.Tid tid) @nogc pure nothrow
     {
         this(tid, false);
     }
 
     /// Private overload used by `spawn`
-    private this (Tid tid, bool isOwner) @nogc pure nothrow
+    private this (C.Tid tid, bool isOwner) @nogc pure nothrow
     {
         this.childTid = tid;
         this.owner = isOwner;
     }
 
-    public Tid tid () @nogc pure nothrow
+    public C.Tid tid () @nogc pure nothrow
     {
         return this.childTid;
     }
@@ -348,7 +348,7 @@ unittest
     auto node1 = factory("normal", 1);
     auto node2 = factory("byzantine", 2);
 
-    static void testFunc(Tid parent)
+    static void testFunc(std.concurrency.Tid parent)
     {
         auto node1 = factory("this does not matter", 1);
         auto node2 = factory("neither does this", 2);
@@ -362,17 +362,19 @@ unittest
         node1.recv(Json.init);
         assert(node1.last() == "recv@1");
         assert(node2.last() == "pubkey");
-        parent.send(42);
+        std.concurrency.send(parent, 42);
     }
 
-    auto testerFiber = spawn(&testFunc, thisTid);
+    auto testerFiber = std.concurrency.spawn(&testFunc, std.concurrency.thisTid);
     // Make sure our main thread terminates after everyone else
-    receiveOnly!int();
+    std.concurrency.receiveOnly!int();
 }
 
 /// This network have different types of nodes in it
 unittest
 {
+    import std.concurrency;
+
     static interface API
     {
         @safe:
@@ -522,12 +524,12 @@ private template GenerateOverload (alias ovrld)
             {
                 auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                     .serializeToJsonString();
-                auto command = Command(thisTid(), ovrld.mangleof, serialized);
+                auto command = Command(C.thisTid(), ovrld.mangleof, serialized);
                 // `std.concurrency.send/receive[Only]` is not `@safe` but
                 // this overload needs to be
                 auto res = () @trusted {
-                    this.childTid.send(command);
-                    return receiveOnly!(Response);
+                    C.send(this.childTid, command);
+                    return C.receiveOnly!(Response);
                 }();
                 if (!res.success)
                     throw new Exception(res.data);
