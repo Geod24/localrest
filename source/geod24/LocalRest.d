@@ -841,8 +841,6 @@ unittest
     static import std.concurrency;
     import std.format;
 
-    __gshared C.Tid[string] tbn;
-
     static interface API
     {
         @safe:
@@ -862,7 +860,9 @@ unittest
 
         public override void setNext (string name) @trusted
         {
-            this.next = new RemoteAPI!API(tbn[name]);
+            auto tid = std.concurrency.locate(name);
+            assert(tid != typeof(tid).init, name);
+            this.next = new RemoteAPI!API(tid);
         }
 
         private API next;
@@ -875,7 +875,7 @@ unittest
     ];
 
     foreach (idx, ref api; nodes)
-        tbn[format("node%d", idx)] = api.tid();
+        std.concurrency.register(format("node%d", idx), api.tid());
     nodes[0].setNext("node1");
     nodes[1].setNext("node2");
     nodes[2].setNext("node0");
