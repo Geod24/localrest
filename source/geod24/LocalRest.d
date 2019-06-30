@@ -299,8 +299,9 @@ public final class RemoteAPI (API) : API
     {
         scope node = new Implementation(cargs);
         scheduler = new LocalScheduler;
+        scope exc = new Exception("You should never see this exception - please report a bug");
 
-        scheduler.start(() {
+        try scheduler.start(() {
                 bool terminated = false;
                 while (!terminated)
                 {
@@ -312,7 +313,12 @@ public final class RemoteAPI (API) : API
                         },
                         (Command cmd) { scheduler.spawn(() => handleCommand(cmd, node)); });
                 }
+                // Make sure the scheduler is not waiting for polling tasks
+                throw exc;
             });
+        catch (Exception e)
+            if (e !is exc)
+                throw e;
     }
 
     /// Where to send message to
