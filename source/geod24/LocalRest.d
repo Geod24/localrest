@@ -355,6 +355,16 @@ public final class RemoteAPI (API) : API
         this.owner = isOwner;
     }
 
+    /***************************************************************************
+
+        Returns the `Tid` this `RemoteAPI` wraps
+
+        This can be useful for calling `std.concurrency.register` or similar.
+        Note that the `Tid` should not be used directly, as our event loop,
+        would error out on an unknown message.
+
+    ***************************************************************************/
+
     public C.Tid tid () @nogc pure nothrow
     {
         return this.childTid;
