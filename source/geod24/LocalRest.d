@@ -189,6 +189,39 @@ private LocalScheduler scheduler;
 
 /*******************************************************************************
 
+    Provide eventloop-like functionalities
+
+    Since nodes instantiated via this modules are Vibe.d server,
+    they expect the ability to run an asynchronous task ,
+    usually provided by `vibe.core.core : runTask`.
+
+    In order for them to properly work, we need to integrate them to our event
+    loop by providing the ability to spawn a task, and wait on some condition,
+    optionally with a timeout.
+
+    The following functions do that.
+    Note that those facilities are not available from the main thread,
+    while is supposed to do tests and doesn't have a scheduler.
+
+*******************************************************************************/
+
+public void runTask (scope void delegate() dg)
+{
+    assert(scheduler !is null, "Cannot call this function from the main thread");
+    scheduler.spawn(dg);
+}
+
+/// Ditto
+public void sleep (Duration timeout)
+{
+    assert(scheduler !is null, "Cannot call this function from the main thread");
+    scope cond = scheduler.new FiberCondition();
+    cond.wait(timeout);
+}
+
+
+/*******************************************************************************
+
     A reference to an alread-instantiated node
 
     This class serves the same purpose as a `RestInterfaceClient`:
@@ -655,4 +688,55 @@ unittest
 
     // 7 level of re-entrancy
     assert(210 == nodes[0].call(20, 0));
+}
+
+
+/// Nodes can start tasks
+unittest
+{
+    static import core.thread;
+    import core.time;
+
+    static interface API
+    {
+        public void start ();
+        public ulong getCounter ();
+    }
+
+    static class Node : API
+    {
+        public override void start ()
+        {
+            runTask(&this.task);
+        }
+
+        public override ulong getCounter ()
+        {
+            scope (exit) this.counter = 0;
+            return this.counter;
+        }
+
+        private void task ()
+        {
+            while (true)
+            {
+                this.counter++;
+                sleep(50.msecs);
+            }
+        }
+
+        private ulong counter;
+    }
+
+    import std.format;
+    auto node = RemoteAPI!API.spawn!Node();
+    assert(node.getCounter() == 0);
+    node.start();
+    assert(node.getCounter() == 1);
+    assert(node.getCounter() == 0);
+    core.thread.Thread.sleep(1.seconds);
+    // It should be 19 but some machines are very slow
+    // (e.g. Travis Mac testers) so be safe
+    assert(node.getCounter() >= 9);
+    assert(node.getCounter() == 0);
 }
