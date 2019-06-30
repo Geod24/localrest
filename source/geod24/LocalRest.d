@@ -43,6 +43,9 @@ static import C = std.concurrency;
 import std.meta : AliasSeq;
 import std.traits : Parameters, ReturnType;
 
+import core.time;
+
+
 /// Data sent by the caller
 private struct Command
 {
@@ -313,7 +316,7 @@ public final class RemoteAPI (API) : API
                 bool terminated = false;
                 while (!terminated)
                 {
-                    C.receive(
+                    C.receiveTimeout(10.msecs,
                         (C.OwnerTerminated e) { terminated = true; },
                         (Response res) {
                             scheduler.pending = res;
