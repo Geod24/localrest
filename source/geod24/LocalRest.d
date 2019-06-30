@@ -156,8 +156,8 @@ public final class RemoteAPI (API) : API
             SWITCH:
                 switch (cmd.method)
                 {
-                    static foreach (member; __traits(allMembers, API))
-                        static foreach (ovrld; __traits(getOverloads, API, member))
+                    foreach (member; __traits(allMembers, API))
+                        foreach (ovrld; __traits(getOverloads, API, member))
                         {
                             mixin(q{
                                     case `%2$s`:
@@ -238,28 +238,13 @@ public final class RemoteAPI (API) : API
 
     ***************************************************************************/
 
-    static foreach (member; __traits(allMembers, API))
-        static foreach (ovrld; __traits(getOverloads, API, member))
-        {
-            mixin(q{
-                override ReturnType!(ovrld) } ~ member ~ q{ (Parameters!ovrld params)
-                {
-                    auto serialized = ArgWrapper!(Parameters!ovrld)(params)
-                        .serializeToJsonString();
-                    auto command = Command(thisTid(), ovrld.mangleof, serialized);
-                    // `std.concurrency.send/receive[Only]` is not `@safe` but
-                    // this overload needs to be
-                    auto res = () @trusted {
-                        this.childTid.send(command);
-                        return receiveOnly!(Response);
-                    }();
-                    if (!res.success)
-                        throw new Exception(res.data);
-                    static if (!is(ReturnType!(ovrld) == void))
-                        return res.data.deserializeJson!(typeof(return));
-                }
-                });
-        }
+    mixin ForeachInst!(GenerateMember, null, __traits(allMembers, API));
+
+    /// Predicate for ForeachInst
+    private template GenerateMember(string name)
+    {
+        mixin ForeachInst!(GenerateOverload, name, __traits(getOverloads, API, name));
+    }
 }
 
 /// Simple usage example
@@ -446,4 +431,97 @@ unittest
     }
 
     assert(nodes[0].requests() == 7);
+}
+
+
+/*******************************************************************************
+
+    Applies a template predicate to a list of arguments and merge the generated
+    overload set.
+
+    This template is explicitly design to generate function definitions within
+    a scope and add them to an overload set.
+    The use of `sym` is necessary because overload sets from mixed-in templates
+    are not merged in the parent.
+
+    Params:
+        Pred = Predicate to generate one of more functions named `sym`
+        sym  = Name of the symbol to merge into an overload set
+        Args = Arguments to instantiate `Pred` with
+
+*******************************************************************************/
+
+private template ForeachInst (alias Pred, string sym, Args...)
+{
+    static if (Args.length >= 1)
+    {
+        mixin Pred!(Args[0]) A0;
+        static if (sym.length)
+            mixin("alias " ~ sym ~ " = A0." ~ sym ~ ";");
+    }
+    static if (Args.length >= 2)
+    {
+        mixin Pred!(Args[1]) A1;
+        static if (sym.length)
+            mixin("alias " ~ sym ~ " = A1." ~ sym ~ ";");
+    }
+    static if (Args.length >= 3)
+    {
+        mixin Pred!(Args[2]) A2;
+        static if (sym.length)
+            mixin("alias " ~ sym ~ " = A2." ~ sym ~ ";");
+    }
+    static if (Args.length >= 4)
+    {
+        mixin Pred!(Args[3]) A3;
+        static if (sym.length)
+            mixin("alias " ~ sym ~ " = A3." ~ sym ~ ";");
+    }
+    static if (Args.length >= 5)
+    {
+        mixin Pred!(Args[4]) A4;
+        static if (sym.length)
+            mixin("alias " ~ sym ~ " = A4." ~ sym ~ ";");
+    }
+    static if (Args.length >= 6)
+    {
+        mixin Pred!(Args[5]) A5;
+        static if (sym.length)
+            mixin("alias " ~ sym ~ " = A5." ~ sym ~ ";");
+    }
+    static if (Args.length >= 7)
+    {
+        mixin Pred!(Args[6]) A6;
+        static if (sym.length)
+            mixin("alias " ~ sym ~ " = A6." ~ sym ~ ";");
+    }
+    static if (Args.length > 7)
+    {
+        mixin ForeachInst!(Pred, sym, Args[7 .. $]) Unrolled;
+        static if (sym.length)
+            mixin("alias " ~ sym ~ " = Unrolled." ~ sym ~ ";");
+    }
+}
+
+/// Predicate for `ForeachInst`
+private template GenerateOverload (alias ovrld)
+{
+    mixin(q{
+            override ReturnType!(ovrld) } ~ __traits(identifier, ovrld) ~ q{ (Parameters!ovrld params)
+            {
+                auto serialized = ArgWrapper!(Parameters!ovrld)(params)
+                    .serializeToJsonString();
+                auto command = Command(thisTid(), ovrld.mangleof, serialized);
+                // `std.concurrency.send/receive[Only]` is not `@safe` but
+                // this overload needs to be
+                auto res = () @trusted {
+                    this.childTid.send(command);
+                    return receiveOnly!(Response);
+                }();
+                if (!res.success)
+                    throw new Exception(res.data);
+                static if (!is(ReturnType!(ovrld) == void))
+                    return res.data.deserializeJson!(typeof(return));
+            }
+        });
 }

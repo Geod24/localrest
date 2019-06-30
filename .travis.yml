@@ -11,20 +11,21 @@ os:
   - linux
   - osx
 
+# Latest version of DMD/GDC/LDC + oldest supported
 d:
   - dmd
   - ldc
   - dmd-2.085.1
   - ldc-1.14.0
 
-# Latest version of DMD/GDC/LDC
 matrix:
   include:
-    - os: linux
+    - d: gdc
+      os: linux
       addons:
         apt:
           sources:
             - ubuntu-toolchain-r-test
           packages:
             - gdc-9
-      env: DC=gdc
+      script: gdc-9 --version && dub test --compiler=gdc-9
