@@ -151,7 +151,15 @@ private final class LocalScheduler : C.FiberScheduler
 
         override bool wait(Duration period) nothrow
         {
-            assert(0); // Unused
+            scope (exit) notified = false;
+
+            for (auto limit = MonoTime.currTime + period;
+                 !notified && !period.isNegative;
+                 period = limit - MonoTime.currTime)
+            {
+                this.outer.yield();
+            }
+            return notified;
         }
 
         override void notify() nothrow
