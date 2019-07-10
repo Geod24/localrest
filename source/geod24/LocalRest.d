@@ -401,17 +401,34 @@ public final class RemoteAPI (API) : API
 
     /***************************************************************************
 
-        Returns the `Tid` this `RemoteAPI` wraps
+        Introduce a namespace to avoid name clashes
 
-        This can be useful for calling `std.concurrency.register` or similar.
-        Note that the `Tid` should not be used directly, as our event loop,
-        would error out on an unknown message.
+        The only way we have a name conflict is if someone exposes `ctrl`,
+        in which case they will be served an error along the following line:
+        LocalRest.d(...): Error: function `RemoteAPI!(...).ctrl` conflicts
+        with mixin RemoteAPI!(...).ControlInterface!() at LocalRest.d(...)
 
     ***************************************************************************/
 
-    public C.Tid tid () @nogc pure nothrow
+    public mixin ControlInterface!() ctrl;
+
+    /// Ditto
+    private mixin template ControlInterface ()
     {
-        return this.childTid;
+        /***********************************************************************
+
+            Returns the `Tid` this `RemoteAPI` wraps
+
+            This can be useful for calling `std.concurrency.register` or similar.
+            Note that the `Tid` should not be used directly, as our event loop,
+            would error out on an unknown message.
+
+        ***********************************************************************/
+
+        public C.Tid tid () @nogc pure nothrow
+        {
+            return this.childTid;
+        }
     }
 
     /***************************************************************************
@@ -739,4 +756,30 @@ unittest
     // (e.g. Travis Mac testers) so be safe
     assert(node.getCounter() >= 9);
     assert(node.getCounter() == 0);
+}
+
+// Sane name insurance policy
+unittest
+{
+    import std.concurrency : Tid;
+
+    static interface API
+    {
+        public ulong tid ();
+    }
+
+    static class Node : API
+    {
+        public override ulong tid () { return 42; }
+    }
+
+    auto node = RemoteAPI!API.spawn!Node();
+    assert(node.tid == 42);
+    assert(node.ctrl.tid != Tid.init);
+
+    static interface DoesntWork
+    {
+        public string ctrl ();
+    }
+    static assert(!is(typeof(RemoteAPI!DoesntWork)));
 }
