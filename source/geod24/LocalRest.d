@@ -43,6 +43,7 @@ static import C = std.concurrency;
 import std.meta : AliasSeq;
 import std.traits : Parameters, ReturnType;
 
+import core.thread;
 import core.time;
 
 
@@ -59,6 +60,15 @@ private struct Command
     string method;
     /// Arguments to the method, JSON formatted
     string args;
+}
+
+/// Ask the node to exhibit a certain behavior for a given time
+private struct TimeCommand
+{
+    /// For how long our remote node apply this behavior
+    Duration dur;
+    /// Whether or not affected messages should be dropped
+    bool drop = false;
 }
 
 /// Data sent by the callee back to the caller
@@ -351,6 +361,11 @@ public final class RemoteAPI (API) : API
                 {
                     C.receiveTimeout(10.msecs,
                         (C.OwnerTerminated e) { terminated = true; },
+                        (TimeCommand s)      {
+                            Thread.sleep(s.dur);
+                            if (s.drop)
+                                removeMessages(size_t.max);
+                        },
                         (Response res) {
                             scheduler.pending = res;
                             scheduler.waiting[res.id].c.notify();
@@ -363,6 +378,16 @@ public final class RemoteAPI (API) : API
         catch (Exception e)
             if (e !is exc)
                 throw e;
+    }
+
+    /// Clear up `max` messages from the pending messages
+    private static size_t removeMessages (size_t count)
+    {
+        const orig = count;
+        while (count > 0 &&
+            C.receiveTimeout(1.msecs, (Response res) {}, (Command res) {}))
+            count--;
+        return orig - count;
     }
 
     /// Where to send message to
@@ -428,6 +453,27 @@ public final class RemoteAPI (API) : API
         public C.Tid tid () @nogc pure nothrow
         {
             return this.childTid;
+        }
+
+        /***********************************************************************
+
+            Make the remote node sleep for `Duration`
+
+            The remote node will call `Thread.sleep`, becoming completely
+            unresponsive, potentially having multiple tasks hanging.
+            This is useful to simulate a delay or a network outage.
+
+            Params:
+              delay = Duration the node will sleep for
+              dropMessages = Whether to process the pending requests when the
+                             node come back online (the default), or to drop
+                             pending traffic
+
+        ***********************************************************************/
+
+        public void sleep (Duration d, bool dropMessages = false) @trusted
+        {
+            C.send(this.childTid, TimeCommand(d, dropMessages));
         }
     }
 
@@ -782,4 +828,71 @@ unittest
         public string ctrl ();
     }
     static assert(!is(typeof(RemoteAPI!DoesntWork)));
+}
+
+// Simulate temporary outage
+unittest
+{
+    __gshared C.Tid n1tid;
+
+    static interface API
+    {
+        public ulong call ();
+        public void asyncCall ();
+    }
+    static class Node : API
+    {
+        public this()
+        {
+            if (n1tid != C.Tid.init)
+                this.remote = new RemoteAPI!API(n1tid);
+        }
+
+        public override ulong call () { return ++this.count; }
+        public override void  asyncCall () { runTask(() => cast(void)this.remote.call); }
+        size_t count;
+        RemoteAPI!API remote;
+    }
+
+    auto n1 = RemoteAPI!API.spawn!Node();
+    n1tid = n1.tid();
+    auto n2 = RemoteAPI!API.spawn!Node();
+
+    /// Make sure calls are *relatively* efficient
+    auto current1 = MonoTime.currTime();
+    assert(1 == n1.call());
+    assert(1 == n2.call());
+    auto current2 = MonoTime.currTime();
+    assert(current2 - current1 < 200.msecs);
+
+    // Make one of the node sleep
+    n1.sleep(1.seconds);
+    // Make sure our main thread is not suspended,
+    // nor is the second node
+    assert(2 == n2.call());
+    auto current3 = MonoTime.currTime();
+    assert(current3 - current2 < 400.msecs);
+
+    // Wait for n1 to unblock
+    assert(2 == n1.call());
+    // Check current time >= 1 second
+    auto current4 = MonoTime.currTime();
+    assert(current4 - current2 >= 1.seconds);
+
+    // Now drop many messages
+    n1.sleep(1.seconds, true);
+    for (size_t i = 0; i < 500; i++)
+        n2.asyncCall();
+    // Make sure we don't end up blocked forever
+    Thread.sleep(1.seconds);
+    assert(3 == n1.call());
+
+    // Debug output, uncomment if needed
+    version (none)
+    {
+        import std.stdio;
+        writeln("Two non-blocking calls: ", current2 - current1);
+        writeln("Sleep + non-blocking call: ", current3 - current2);
+        writeln("Delta since sleep: ", current4 - current2);
+    }
 }
