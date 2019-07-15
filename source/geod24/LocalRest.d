@@ -71,6 +71,16 @@ private struct TimeCommand
     bool drop = false;
 }
 
+/// Filter out requests before they reach a node
+private struct FilterAPI
+{
+    /// the mangled symbol name of the function to filter
+    string func_mangleof;
+
+    /// used for debugging
+    string pretty_func;
+}
+
 /// Data sent by the callee back to the caller
 private struct Response
 {
@@ -287,8 +297,20 @@ public final class RemoteAPI (API) : API
             private alias CtorParams = AliasSeq!();
     }
 
-    ///
-    private static void handleCommand (Command cmd, API node)
+    /***************************************************************************
+
+        Handler function
+
+        The filter
+
+        Params:
+            cmd    = the command to run (contains the method name and the arguments)
+            node   = the node to invoke the method on
+            filter = used for filtering API calls (returns default response)
+
+    ***************************************************************************/
+
+    private static void handleCommand (Command cmd, API node, FilterAPI filter)
     {
         import std.format;
 
@@ -302,6 +324,15 @@ public final class RemoteAPI (API) : API
                     case `%2$s`:
                     try
                     {
+                        if (cmd.method == filter.func_mangleof)
+                        {
+                            // we have to send back a message
+                            import std.format;
+                            C.send(cmd.sender, Response(false, cmd.id,
+                                format("Filtered method '%%s'", filter.pretty_func)));
+                            return;
+                        }
+
                         auto args = cmd.args.deserializeJson!(ArgWrapper!(Parameters!ovrld));
 
                         static if (!is(ReturnType!ovrld == void))
@@ -354,6 +385,8 @@ public final class RemoteAPI (API) : API
         scheduler = new LocalScheduler;
         scope exc = new Exception("You should never see this exception - please report a bug");
 
+        FilterAPI filter;
+
         try scheduler.start(() {
                 bool terminated = false;
                 while (!terminated)
@@ -365,11 +398,17 @@ public final class RemoteAPI (API) : API
                             if (s.drop)
                                 removeMessages(size_t.max);
                         },
+                        (FilterAPI filter_api) {
+                            filter = filter_api;
+                        },
                         (Response res) {
                             scheduler.pending = res;
                             scheduler.waiting[res.id].c.notify();
                         },
-                        (Command cmd) { scheduler.spawn(() => handleCommand(cmd, node)); });
+                        (Command cmd)
+                        {
+                            scheduler.spawn(() => handleCommand(cmd, node, filter));
+                        });
                 }
                 // Make sure the scheduler is not waiting for polling tasks
                 throw exc;
@@ -473,6 +512,84 @@ public final class RemoteAPI (API) : API
         public void sleep (Duration d, bool dropMessages = false) @trusted
         {
             C.send(this.childTid, TimeCommand(d, dropMessages));
+        }
+
+        /***********************************************************************
+
+            Filter any requests issued to the provided method.
+
+            Calling the API endpoint will throw an exception,
+            therefore the request will fail.
+
+            Use via:
+
+            ----
+            interface API { void call(); }
+            class C : API { void call() { } }
+            auto obj = new RemoteAPI!API(...);
+            obj.filter!(API.call);
+            ----
+
+            To match a specific overload of a method, specify the
+            parameters to match against in the call. For example:
+
+            ----
+            interface API { void call(int); void call(int, float); }
+            class C : API { void call(int) {} void call(int, float) {} }
+            auto obj = new RemoteAPI!API(...);
+            obj.filter!(API.call, int, float);  // only filters the second overload
+            ----
+
+            Params:
+              method = the API method for which to filter out requests
+              T = (optional) the parameters to match against (to select an overload)
+
+        ***********************************************************************/
+
+        public void filter (alias method, OverloadParams...) () @trusted
+        {
+            import std.format;
+            import std.traits;
+            enum method_name = __traits(identifier, method);
+
+            // return the mangled name of the matching overload
+            template getBestMatch (T...)
+            {
+                static if (is(Parameters!(T[0]) == OverloadParams))
+                {
+                    enum getBestMatch = T[0].mangleof;
+                }
+                else static if (T.length > 0)
+                {
+                    enum getBestMatch = getBestMatch!(T[1 .. $]);
+                }
+                else
+                {
+                    static assert(0,
+                        format("Couldn't select best overload of '%s' for " ~
+                        "parameter types: %s",
+                        method_name, OverloadParams.stringof));
+                }
+            }
+
+            immutable pretty = format("%s%s", method_name, OverloadParams.stringof);
+
+            // ensure it's used with API.method, *not* RemoteAPI.method which
+            // is an override of API.method. Otherwise mangling won't match!
+            enum mangled = getBestMatch!(__traits(getOverloads, API, method_name));
+            C.send(this.childTid, FilterAPI(mangled, pretty));
+        }
+
+
+        /***********************************************************************
+
+            Clear out any filtering set by a call to filter()
+
+        ***********************************************************************/
+
+        public void clearFilter () @trusted
+        {
+            C.send(this.childTid, FilterAPI(""));
         }
     }
 
@@ -894,4 +1011,109 @@ unittest
         writeln("Sleep + non-blocking call: ", current3 - current2);
         writeln("Delta since sleep: ", current4 - current2);
     }
+}
+
+// Filter commands
+unittest
+{
+    __gshared C.Tid node_tid;
+
+    static interface API
+    {
+        size_t fooCount();
+        size_t fooIntCount();
+        void foo ();
+        void foo (int);
+        void asyncFoo ();
+        void asyncFoo (int);
+    }
+
+    static class Node : API
+    {
+        size_t foo_count;
+        size_t foo_int_count;
+        RemoteAPI!API remote;
+
+        public this()
+        {
+            this.remote = new RemoteAPI!API(node_tid);
+        }
+
+        override size_t fooCount() { return this.foo_count; }
+        override size_t fooIntCount() { return this.foo_int_count; }
+        override void foo () { ++this.foo_count; }
+        override void foo (int) { ++this.foo_int_count; }
+
+        override void asyncFoo()
+        {
+            runTask(
+                ()
+                {
+                    try
+                    {
+                        this.remote.foo();
+                    }
+                    catch (Exception ex)
+                    {
+                        assert(ex.msg == "Filtered method 'foo()'");
+                    }
+                }
+            );
+        }
+
+        override void asyncFoo(int arg)
+        {
+            runTask(
+                ()
+                {
+                    try
+                    {
+                        this.remote.foo(arg);
+                    }
+                    catch (Exception ex)
+                    {
+                        assert(ex.msg == "Filtered method 'foo(int)'");
+                    }
+                }
+            );
+        }
+    }
+
+    auto node = RemoteAPI!API.spawn!Node();
+    node_tid = node.tid();
+    node.foo();
+    assert(node.fooCount() == 1);
+
+    // both of these work
+    static assert(is(typeof(node.filter!(API.foo))));
+    static assert(is(typeof(node.filter!(node.foo))));
+
+    node.filter!(API.foo);
+
+    // foo() filtered
+    node.asyncFoo();
+    assert(node.fooCount() == 1);  // it was not called!
+
+    node.clearFilter();  // clear the filter
+    node.asyncFoo();
+    assert(node.fooCount() == 2);  // it was called!
+
+    // verify foo(int) works first
+    node.asyncFoo(1);
+    assert(node.fooCount() == 2);
+    assert(node.fooIntCount() == 1);  // first time called
+
+    // now filter only the int overload
+    node.filter!(API.foo, int);
+
+    // make sure the parameterless overload is still not filtered
+    node.asyncFoo();
+    assert(node.fooCount() == 3);  // updated
+
+    node.asyncFoo(1);
+    assert(node.fooIntCount() == 1);  // call filtered!
+
+    // one last blocking call, to ensure the previous call completes
+    node.clearFilter();
+    node.foo();
 }
