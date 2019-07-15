@@ -300,7 +300,6 @@ public final class RemoteAPI (API) : API
                 mixin(
                 q{
                     case `%2$s`:
-                    alias Method = ovrld;
                     try
                     {
                         auto args = cmd.args.deserializeJson!(ArgWrapper!(Parameters!ovrld));
