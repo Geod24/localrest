@@ -542,7 +542,11 @@ public final class RemoteAPI (API) : API
 
             Params:
               method = the API method for which to filter out requests
-              T = (optional) the parameters to match against (to select an overload)
+              OverloadParams = (optional) the parameters to match against
+                  to select an overload. Note that if the method has no other
+                  overloads, then even if that method takes parameters and
+                  OverloadParams is empty, it will match that method
+                  out of convenience.
 
         ***********************************************************************/
 
@@ -572,11 +576,22 @@ public final class RemoteAPI (API) : API
                 }
             }
 
-            immutable pretty = format("%s%s", method_name, OverloadParams.stringof);
-
             // ensure it's used with API.method, *not* RemoteAPI.method which
             // is an override of API.method. Otherwise mangling won't match!
-            enum mangled = getBestMatch!(__traits(getOverloads, API, method_name));
+            // special-case: no other overloads, and parameter list is empty:
+            // just select that one API method
+            alias Overloads = __traits(getOverloads, API, method_name);
+            static if (Overloads.length == 1 && OverloadParams.length == 0)
+            {
+                immutable pretty = method_name ~ Parameters!(Overloads[0]).stringof;
+                enum mangled = Overloads[0].mangleof;
+            }
+            else
+            {
+                immutable pretty = format("%s%s", method_name, OverloadParams.stringof);
+                enum mangled = getBestMatch!Overloads;
+            }
+
             C.send(this.childTid, FilterAPI(mangled, pretty));
         }
 
@@ -1022,9 +1037,11 @@ unittest
     {
         size_t fooCount();
         size_t fooIntCount();
+        size_t barCount ();
         void foo ();
         void foo (int);
         void bar (int);  // not in any overload set
+        void asyncBar (int);
         void asyncFoo ();
         void asyncFoo (int);
     }
@@ -1033,6 +1050,7 @@ unittest
     {
         size_t foo_count;
         size_t foo_int_count;
+        size_t bar_count;
         RemoteAPI!API remote;
 
         public this()
@@ -1042,9 +1060,13 @@ unittest
 
         override size_t fooCount() { return this.foo_count; }
         override size_t fooIntCount() { return this.foo_int_count; }
+        override size_t barCount() { return this.bar_count; }
         override void foo () { ++this.foo_count; }
         override void foo (int) { ++this.foo_int_count; }
-        override void bar (int) { }  // not in any overload set
+        override void bar (int) { ++this.bar_count; }  // not in any overload set
+        // This one is part of the overload set of the node, but not of the API
+        // It can't be accessed via API and can't be filtered out
+        void bar(string) { assert(0); }
 
         override void asyncFoo()
         {
@@ -1079,6 +1101,23 @@ unittest
                 }
             );
         }
+
+        override void asyncBar(int arg)
+        {
+            runTask(
+                ()
+                {
+                    try
+                    {
+                        this.remote.bar(arg);
+                    }
+                    catch (Exception ex)
+                    {
+                        assert(ex.msg == "Filtered method 'bar(int)'");
+                    }
+                }
+            );
+        }
     }
 
     auto node = RemoteAPI!API.spawn!Node();
@@ -1092,7 +1131,12 @@ unittest
 
     // only method in the overload set that takes a parameter,
     // should still match a call to filter with no parameters
-    static assert(!is(typeof(node.filter!(node.bar))));
+    static assert(is(typeof(node.filter!(node.bar))));
+
+    // wrong parameters => fail to compile
+    static assert(!is(typeof(node.filter!(node.bar, float))));
+    // Only `API` overload sets are considered
+    static assert(!is(typeof(node.filter!(node.bar, string))));
 
     node.filter!(API.foo);
 
@@ -1119,7 +1163,16 @@ unittest
     node.asyncFoo(1);
     assert(node.fooIntCount() == 1);  // call filtered!
 
-    // one last blocking call, to ensure the previous call completes
+    // not filtered yet
+    node.asyncBar(1);
+    assert(node.barCount() == 1);
+
+    node.filter!(node.bar);
+    node.asyncBar(1);
+    assert(node.barCount() == 1);  // filtered!
+
+    // last blocking calls, to ensure the previous calls complete
     node.clearFilter();
     node.foo();
+    node.bar(1);
 }
