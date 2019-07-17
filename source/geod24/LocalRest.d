@@ -1024,6 +1024,7 @@ unittest
         size_t fooIntCount();
         void foo ();
         void foo (int);
+        void bar (int);  // not in any overload set
         void asyncFoo ();
         void asyncFoo (int);
     }
@@ -1043,6 +1044,7 @@ unittest
         override size_t fooIntCount() { return this.foo_int_count; }
         override void foo () { ++this.foo_count; }
         override void foo (int) { ++this.foo_int_count; }
+        override void bar (int) { }  // not in any overload set
 
         override void asyncFoo()
         {
@@ -1087,6 +1089,10 @@ unittest
     // both of these work
     static assert(is(typeof(node.filter!(API.foo))));
     static assert(is(typeof(node.filter!(node.foo))));
+
+    // only method in the overload set that takes a parameter,
+    // should still match a call to filter with no parameters
+    static assert(!is(typeof(node.filter!(node.bar))));
 
     node.filter!(API.foo);
 
