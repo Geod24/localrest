@@ -87,6 +87,9 @@ private enum Status
     /// Request failed
     Failed,
 
+    /// Request timed-out
+    Timeout,
+
     /// Request succeeded
     Success
 }
@@ -94,7 +97,7 @@ private enum Status
 /// Data sent by the callee back to the caller
 private struct Response
 {
-    /// Final status of a request (failed, success, etc)
+    /// Final status of a request (failed, timeout, success, etc)
     Status status;
     /// In order to support re-entrancy, every request contains an id
     /// which should be copied in the `Response` so the scheduler can
@@ -144,7 +147,7 @@ private final class LocalScheduler : C.FiberScheduler
         return this.waiting.length;
     }
 
-    public Response waitResponse (size_t id) nothrow
+    public Response waitResponse (size_t id, Duration duration) nothrow
     {
         if (id == this.waiting.length)
             this.waiting ~= Waiting(new FiberCondition, false);
@@ -157,7 +160,12 @@ private final class LocalScheduler : C.FiberScheduler
 
         // We yield and wait for an answer
         ptr.busy = true;
-        ptr.c.wait();
+
+        if (duration == Duration.init)
+            ptr.c.wait();
+        else if (!ptr.c.wait(duration))
+            this.pending = Response(Status.Timeout, this.pending.id);
+
         ptr.busy = false;
         // After control returns to us, `pending` has been filled
         scope(exit) this.pending = Response.init;
@@ -285,16 +293,18 @@ public final class RemoteAPI (API) : API
         Params:
           Impl = Type of the implementation to instantiate
           args = Arguments to the object's constructor
+          timeout = (optional) timeout to use with requests
 
         Returns:
           A `RemoteAPI` owning the node reference
 
     ***************************************************************************/
 
-    public static RemoteAPI!(API) spawn (Impl) (CtorParams!Impl args)
+    public static RemoteAPI!(API) spawn (Impl) (CtorParams!Impl args,
+        Duration timeout = Duration.init)
     {
         auto childTid = C.spawn(&spawned!(Impl), args);
-        return new RemoteAPI(childTid, true);
+        return new RemoteAPI(childTid, true, timeout);
     }
 
     /// Helper template to get the constructor's parameters
@@ -443,6 +453,9 @@ public final class RemoteAPI (API) : API
     /// Whether or not the destructor should destroy the thread
     private bool owner;
 
+    /// Timeout to use when issuing requests
+    private const Duration timeout;
+
     // Vibe.d mandates that method must be @safe
     @safe:
 
@@ -456,19 +469,21 @@ public final class RemoteAPI (API) : API
         Params:
           tid = `std.concurrency.Tid` of the node.
                 This can usually be obtained by `std.concurrency.locate`.
+          timeout = any timeout to use
 
     ***************************************************************************/
 
-    public this (C.Tid tid) @nogc pure nothrow
+    public this (C.Tid tid, Duration timeout = Duration.init) @nogc pure nothrow
     {
-        this(tid, false);
+        this(tid, false, timeout);
     }
 
     /// Private overload used by `spawn`
-    private this (C.Tid tid, bool isOwner) @nogc pure nothrow
+    private this (C.Tid tid, bool isOwner, Duration timeout) @nogc pure nothrow
     {
         this.childTid = tid;
         this.owner = isOwner;
+        this.timeout = timeout;
     }
 
     /***************************************************************************
@@ -637,18 +652,43 @@ public final class RemoteAPI (API) : API
                     auto res = () @trusted {
                         // We're in the main thread / client, no re-entrancy,
                         // and no scheduler in sight, so KISS
-                        if (scheduler is null) {
+                        if (scheduler is null)
+                        {
                             C.send(this.childTid, command);
-                            return C.receiveOnly!(Response);
+
+                            if (this.timeout == Duration.init)
+                            {
+                                return C.receiveOnly!(Response);
+                            }
+                            else
+                            {
+                                Response actual_res;
+                                if (C.receiveTimeout(this.timeout,
+                                    (Response res)
+                                    {
+                                        actual_res = res;
+                                    }))
+                                {
+                                    return actual_res;
+                                }
+
+                                return Response(Status.Timeout, command.id);
+                            }
                         }
+
                         // Scheduler / re-entrant path
                         command.id = scheduler.getNextResponseId();
                         C.send(this.childTid, command);
-                        auto res = scheduler.waitResponse(command.id);
+                        auto res = scheduler.waitResponse(command.id, this.timeout);
                         return res;
                     }();
-                    if (res.status == Status.Failure)
+
+                    if (res.status == Status.Failed)
                         throw new Exception(res.data);
+
+                    if (res.status == Status.Timeout)
+                        throw new Exception(serializeToJsonString("Request timed-out"));
+
                     static if (!is(ReturnType!(ovrld) == void))
                         return res.data.deserializeJson!(typeof(return));
                 }
@@ -1171,4 +1211,84 @@ unittest
     filtered.clearFilter();
     caller.foo();
     caller.bar(1);
+}
+
+// request timeouts (from main thread)
+unittest
+{
+    import core.thread;
+    import std.exception;
+
+    static interface API
+    {
+        size_t sleepFor (long dur);
+    }
+
+    static class Node : API
+    {
+        override size_t sleepFor (long dur)
+        {
+            Thread.sleep(msecs(dur));
+            return 42;
+        }
+    }
+
+    // node with no timeout
+    auto node = RemoteAPI!API.spawn!Node();
+    assert(node.sleepFor(80) == 42);  // no timeout
+
+    // node with a configured timeout
+    auto to_node = RemoteAPI!API.spawn!Node(500.msecs);
+
+    /// none of these should time out
+    assert(to_node.sleepFor(10) == 42);
+    assert(to_node.sleepFor(20) == 42);
+    assert(to_node.sleepFor(30) == 42);
+    assert(to_node.sleepFor(40) == 42);
+
+    auto exc = collectException!Exception(to_node.sleepFor(2000));
+    assert(exc !is null);
+}
+
+// request timeouts (foreign node to another node)
+unittest
+{
+    static import std.concurrency;
+    import core.thread;
+    import std.exception;
+    import std.format;
+
+    __gshared C.Tid node_tid;
+
+    static interface API
+    {
+        void check ();
+        size_t sleepFor (long dur);
+    }
+
+    static class Node : API
+    {
+        override void check ()
+        {
+            auto node = new RemoteAPI!API(node_tid, 500.msecs);
+
+            // no time-out
+            assert(node.sleepFor(10) == 42);
+
+            // time-out
+            auto exc = collectException!Exception(node.sleepFor(2000));
+            assert(exc !is null);
+        }
+
+        override size_t sleepFor (long dur)
+        {
+            Thread.sleep(msecs(dur));
+            return 42;
+        }
+    }
+
+    auto node_1 = RemoteAPI!API.spawn!Node();
+    auto node_2 = RemoteAPI!API.spawn!Node();
+    node_tid = node_2.tid;
+    node_1.check();
 }
