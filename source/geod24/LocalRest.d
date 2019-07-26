@@ -1041,9 +1041,9 @@ unittest
         void foo ();
         void foo (int);
         void bar (int);  // not in any overload set
-        void asyncBar (int);
-        void asyncFoo ();
-        void asyncFoo (int);
+        void callBar (int);
+        void callFoo ();
+        void callFoo (int);
     }
 
     static class Node : API
@@ -1068,111 +1068,98 @@ unittest
         // It can't be accessed via API and can't be filtered out
         void bar(string) { assert(0); }
 
-        override void asyncFoo()
+        override void callFoo()
         {
-            runTask(
-                ()
-                {
-                    try
-                    {
-                        this.remote.foo();
-                    }
-                    catch (Exception ex)
-                    {
-                        assert(ex.msg == "Filtered method 'foo()'");
-                    }
-                }
-            );
+            try
+            {
+                this.remote.foo();
+            }
+            catch (Exception ex)
+            {
+                assert(ex.msg == "Filtered method 'foo()'");
+            }
         }
 
-        override void asyncFoo(int arg)
+        override void callFoo(int arg)
         {
-            runTask(
-                ()
-                {
-                    try
-                    {
-                        this.remote.foo(arg);
-                    }
-                    catch (Exception ex)
-                    {
-                        assert(ex.msg == "Filtered method 'foo(int)'");
-                    }
-                }
-            );
+            try
+            {
+                this.remote.foo(arg);
+            }
+            catch (Exception ex)
+            {
+                assert(ex.msg == "Filtered method 'foo(int)'");
+            }
         }
 
-        override void asyncBar(int arg)
+        override void callBar(int arg)
         {
-            runTask(
-                ()
-                {
-                    try
-                    {
-                        this.remote.bar(arg);
-                    }
-                    catch (Exception ex)
-                    {
-                        assert(ex.msg == "Filtered method 'bar(int)'");
-                    }
-                }
-            );
+            try
+            {
+                this.remote.bar(arg);
+            }
+            catch (Exception ex)
+            {
+                assert(ex.msg == "Filtered method 'bar(int)'");
+            }
         }
     }
 
-    auto node = RemoteAPI!API.spawn!Node();
-    node_tid = node.tid();
-    node.foo();
-    assert(node.fooCount() == 1);
+    auto filtered = RemoteAPI!API.spawn!Node();
+    node_tid = filtered.tid();
+
+    // caller will call filtered
+    auto caller = RemoteAPI!API.spawn!Node();
+    caller.callFoo();
+    assert(filtered.fooCount() == 1);
 
     // both of these work
-    static assert(is(typeof(node.filter!(API.foo))));
-    static assert(is(typeof(node.filter!(node.foo))));
+    static assert(is(typeof(filtered.filter!(API.foo))));
+    static assert(is(typeof(filtered.filter!(filtered.foo))));
 
     // only method in the overload set that takes a parameter,
     // should still match a call to filter with no parameters
-    static assert(is(typeof(node.filter!(node.bar))));
+    static assert(is(typeof(filtered.filter!(filtered.bar))));
 
     // wrong parameters => fail to compile
-    static assert(!is(typeof(node.filter!(node.bar, float))));
+    static assert(!is(typeof(filtered.filter!(filtered.bar, float))));
     // Only `API` overload sets are considered
-    static assert(!is(typeof(node.filter!(node.bar, string))));
+    static assert(!is(typeof(filtered.filter!(filtered.bar, string))));
 
-    node.filter!(API.foo);
+    filtered.filter!(API.foo);
 
-    // foo() filtered
-    node.asyncFoo();
-    assert(node.fooCount() == 1);  // it was not called!
+    caller.callFoo();
+    assert(filtered.fooCount() == 1);  // it was not called!
 
-    node.clearFilter();  // clear the filter
-    node.asyncFoo();
-    assert(node.fooCount() == 2);  // it was called!
+    filtered.clearFilter();  // clear the filter
+    caller.callFoo();
+    assert(filtered.fooCount() == 2);  // it was called!
 
     // verify foo(int) works first
-    node.asyncFoo(1);
-    assert(node.fooCount() == 2);
-    assert(node.fooIntCount() == 1);  // first time called
+    caller.callFoo(1);
+    assert(filtered.fooCount() == 2);
+    assert(filtered.fooIntCount() == 1);  // first time called
 
     // now filter only the int overload
-    node.filter!(API.foo, int);
+    filtered.filter!(API.foo, int);
 
     // make sure the parameterless overload is still not filtered
-    node.asyncFoo();
-    assert(node.fooCount() == 3);  // updated
+    caller.callFoo();
+    assert(filtered.fooCount() == 3);  // updated
 
-    node.asyncFoo(1);
-    assert(node.fooIntCount() == 1);  // call filtered!
+    caller.callFoo(1);
+    assert(filtered.fooIntCount() == 1);  // call filtered!
 
     // not filtered yet
-    node.asyncBar(1);
-    assert(node.barCount() == 1);
+    caller.callBar(1);
+    assert(filtered.barCount() == 1);
 
-    node.filter!(node.bar);
-    node.asyncBar(1);
-    assert(node.barCount() == 1);  // filtered!
+    filtered.filter!(filtered.bar);
+    caller.callBar(1);
+    assert(filtered.barCount() == 1);  // filtered!
 
     // last blocking calls, to ensure the previous calls complete
-    node.clearFilter();
-    node.foo();
-    node.bar(1);
+    filtered.clearFilter();
+    caller.foo();
+    caller.bar(1);
 }
