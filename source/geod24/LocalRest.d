@@ -81,18 +81,27 @@ private struct FilterAPI
     string pretty_func;
 }
 
+/// Status of a request
+private enum Status
+{
+    /// Request failed
+    Failed,
+
+    /// Request succeeded
+    Success
+}
+
 /// Data sent by the callee back to the caller
 private struct Response
 {
-    /// `true` if the method returned successfully,
-    /// `false` if an `Exception` occured
-    bool success;
+    /// Final status of a request (failed, success, etc)
+    Status status;
     /// In order to support re-entrancy, every request contains an id
     /// which should be copied in the `Response` so the scheduler can
     /// properly dispatch this event
     /// Initialized to `size_t.max` so not setting it crashes the program
     size_t id;
-    /// If `success == true`, the JSON-serialized return value.
+    /// If `status == Status.Success`, the JSON-serialized return value.
     /// Otherwise, it contains `Exception.toString()`.
     string data;
 }
@@ -328,7 +337,7 @@ public final class RemoteAPI (API) : API
                         {
                             // we have to send back a message
                             import std.format;
-                            C.send(cmd.sender, Response(false, cmd.id,
+                            C.send(cmd.sender, Response(Status.Failed, cmd.id,
                                 format("Filtered method '%%s'", filter.pretty_func)));
                             return;
                         }
@@ -339,20 +348,20 @@ public final class RemoteAPI (API) : API
                         {
                             C.send(cmd.sender,
                                 Response(
-                                    true,
+                                    Status.Success,
                                     cmd.id,
                                     node.%1$s(args.args).serializeToJsonString()));
                         }
                         else
                         {
                             node.%1$s(args.args);
-                            C.send(cmd.sender, Response(true, cmd.id));
+                            C.send(cmd.sender, Response(Status.Success, cmd.id));
                         }
                     }
                     catch (Throwable t)
                     {
                         // Our sender expects a response
-                        C.send(cmd.sender, Response(false, cmd.id, t.toString()));
+                        C.send(cmd.sender, Response(Status.Failed, cmd.id, t.toString()));
                     }
 
                     return;
@@ -638,7 +647,7 @@ public final class RemoteAPI (API) : API
                         auto res = scheduler.waitResponse(command.id);
                         return res;
                     }();
-                    if (!res.success)
+                    if (res.status == Status.Failure)
                         throw new Exception(res.data);
                     static if (!is(ReturnType!(ovrld) == void))
                         return res.data.deserializeJson!(typeof(return));
