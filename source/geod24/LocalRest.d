@@ -400,17 +400,51 @@ public final class RemoteAPI (API) : API
 
     private static void spawned (Implementation) (CtorParams!Implementation cargs)
     {
+        import std.datetime.systime : Clock, SysTime;
+        import std.algorithm : each;
+        import std.range;
+
         scope node = new Implementation(cargs);
         scheduler = new LocalScheduler;
         scope exc = new Exception("You should never see this exception - please report a bug");
 
-        FilterAPI filter;
+        // very simple & limited variant, to keep it performant.
+        // should be replaced by a real Variant later
+        static struct Variant
+        {
+            this (Response res) { this.res = res; this.tag = 0; }
+            this (Command cmd) { this.cmd = cmd; this.tag = 1; }
+
+            union
+            {
+                Response res;
+                Command cmd;
+            }
+
+            ubyte tag;
+        }
+
+        // used for controling filtering / sleep
+        struct Control
+        {
+            FilterAPI filter;    // filter specific messages
+            SysTime sleep_until; // sleep until this time
+            bool drop;           // drop messages if sleeping
+        }
+
+        Control control;
+
+        bool isSleeping()
+        {
+            return control.sleep_until != SysTime.init
+                && Clock.currTime < control.sleep_until;
+        }
 
         void handle (T)(T arg)
         {
             static if (is(T == Command))
             {
-                scheduler.spawn(() => handleCommand(arg, node, filter));
+                scheduler.spawn(() => handleCommand(arg, node, control.filter));
             }
             else static if (is(T == Response))
             {
@@ -420,6 +454,10 @@ public final class RemoteAPI (API) : API
             else static assert(0, "Unhandled type: " ~ T.stringof);
         }
 
+        // we need to keep track of messages which were ignored when
+        // node.sleep() was used, and then handle each message in sequence.
+        Variant[] await_msgs;
+
         try scheduler.start(() {
                 bool terminated = false;
                 while (!terminated)
@@ -427,20 +465,33 @@ public final class RemoteAPI (API) : API
                     C.receiveTimeout(10.msecs,
                         (C.OwnerTerminated e) { terminated = true; },
                         (TimeCommand s)      {
-                            Thread.sleep(s.dur);
-                            if (s.drop)
-                                removeMessages(size_t.max);
+                            control.sleep_until = Clock.currTime + s.dur;
+                            control.drop = s.drop;
                         },
                         (FilterAPI filter_api) {
-                            filter = filter_api;
+                            control.filter = filter_api;
                         },
                         (Response res) {
-                            handle(res);
+                            if (!isSleeping())
+                                handle(res);
+                            else if (!control.drop)
+                                await_msgs ~= Variant(res);
                         },
                         (Command cmd)
                         {
-                            handle(cmd);
+                            if (!isSleeping())
+                                handle(cmd);
+                            else if (!control.drop)
+                                await_msgs ~= Variant(cmd);
                         });
+
+                    // now handle any leftover messages after any sleep() call
+                    if (!isSleeping())
+                    {
+                        await_msgs.each!(msg => msg.tag == 0 ? handle(msg.res) : handle(msg.cmd));
+                        await_msgs.length = 0;
+                        assumeSafeAppend(await_msgs);
+                    }
                 }
                 // Make sure the scheduler is not waiting for polling tasks
                 throw exc;
@@ -448,16 +499,6 @@ public final class RemoteAPI (API) : API
         catch (Exception e)
             if (e !is exc)
                 throw e;
-    }
-
-    /// Clear up `max` messages from the pending messages
-    private static size_t removeMessages (size_t count)
-    {
-        const orig = count;
-        while (count > 0 &&
-            C.receiveTimeout(1.msecs, (Response res) {}, (Command res) {}))
-            count--;
-        return orig - count;
     }
 
     /// Where to send message to
