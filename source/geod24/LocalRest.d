@@ -406,6 +406,20 @@ public final class RemoteAPI (API) : API
 
         FilterAPI filter;
 
+        void handle (T)(T arg)
+        {
+            static if (is(T == Command))
+            {
+                scheduler.spawn(() => handleCommand(arg, node, filter));
+            }
+            else static if (is(T == Response))
+            {
+                scheduler.pending = arg;
+                scheduler.waiting[arg.id].c.notify();
+            }
+            else static assert(0, "Unhandled type: " ~ T.stringof);
+        }
+
         try scheduler.start(() {
                 bool terminated = false;
                 while (!terminated)
@@ -421,12 +435,11 @@ public final class RemoteAPI (API) : API
                             filter = filter_api;
                         },
                         (Response res) {
-                            scheduler.pending = res;
-                            scheduler.waiting[res.id].c.notify();
+                            handle(res);
                         },
                         (Command cmd)
                         {
-                            scheduler.spawn(() => handleCommand(cmd, node, filter));
+                            handle(cmd);
                         });
                 }
                 // Make sure the scheduler is not waiting for polling tasks
