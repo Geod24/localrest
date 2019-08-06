@@ -113,6 +113,8 @@ private struct Response
 /// Vibe.d might emit a pragma(msg) when T.length == 0
 private struct ArgWrapper (T...)
 {
+    static if (T.length == 0)
+        size_t dummy;
     T args;
 }
 
