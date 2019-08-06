@@ -28,3 +28,8 @@ matrix:
           packages:
             - gdc-9
       env: DC=gdc
+
+script:
+ - dub test -b unittest-cov --compiler=${DC}
+after_success:
+ - bash <(curl -s https://codecov.io/bash) -cF unittests
