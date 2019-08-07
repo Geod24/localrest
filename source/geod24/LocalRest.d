@@ -1377,3 +1377,42 @@ unittest
     node_tid = node_2.tid;
     node_1.check();
 }
+
+// Test a node that gets a replay while it's delayed
+unittest
+{
+    static import std.concurrency;
+    import std.exception;
+
+    __gshared C.Tid node_tid;
+
+    static interface API
+    {
+        void check ();
+        int ping ();
+    }
+
+    static class Node : API
+    {
+        override int ping () { return 42; }
+
+        override void check ()
+        {
+            auto node = new RemoteAPI!API(node_tid, 5000.msecs);
+            assert(node.ping() == 42);
+            // We need to return immediately so that the main thread
+            // puts us to sleep
+            runTask(() {
+                    node.ctrl.sleep(200.msecs);
+                    assert(node.ping() == 42);
+                });
+        }
+    }
+
+    auto node_1 = RemoteAPI!API.spawn!Node(500.msecs);
+    auto node_2 = RemoteAPI!API.spawn!Node();
+    node_tid = node_2.tid;
+    node_1.check();
+    node_1.ctrl.sleep(300.msecs);
+    assert(node_1.ping() == 42);
+}
