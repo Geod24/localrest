@@ -1309,36 +1309,31 @@ unittest
 unittest
 {
     static import std.concurrency;
-    import core.thread;
     import std.exception;
-    import std.format;
 
     __gshared C.Tid node_tid;
 
     static interface API
     {
         void check ();
-        size_t sleepFor (long dur);
+        int ping ();
     }
 
     static class Node : API
     {
+        override int ping () { return 42; }
+
         override void check ()
         {
             auto node = new RemoteAPI!API(node_tid, 500.msecs);
 
             // no time-out
-            assert(node.sleepFor(10) == 42);
+            node.ctrl.sleep(10.msecs);
+            assert(node.ping() == 42);
 
             // time-out
-            auto exc = collectException!Exception(node.sleepFor(2000));
-            assert(exc !is null);
-        }
-
-        override size_t sleepFor (long dur)
-        {
-            Thread.sleep(msecs(dur));
-            return 42;
+            node.ctrl.sleep(2000.msecs);
+            assertThrown!Exception(node.ping());
         }
     }
 
