@@ -1342,3 +1342,38 @@ unittest
     node_tid = node_2.tid;
     node_1.check();
 }
+
+// request timeouts with dropped messages
+unittest
+{
+    static import std.concurrency;
+    import std.exception;
+
+    __gshared C.Tid node_tid;
+
+    static interface API
+    {
+        void check ();
+        int ping ();
+    }
+
+    static class Node : API
+    {
+        override int ping () { return 42; }
+
+        override void check ()
+        {
+            auto node = new RemoteAPI!API(node_tid, 420.msecs);
+
+            // Requests are dropped, so it times out
+            assert(node.ping() == 42);
+            node.ctrl.sleep(10.msecs, true);
+            assertThrown!Exception(node.ping());
+        }
+    }
+
+    auto node_1 = RemoteAPI!API.spawn!Node();
+    auto node_2 = RemoteAPI!API.spawn!Node();
+    node_tid = node_2.tid;
+    node_1.check();
+}
