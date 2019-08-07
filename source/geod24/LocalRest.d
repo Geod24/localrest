@@ -1302,8 +1302,7 @@ unittest
     assert(to_node.sleepFor(30) == 42);
     assert(to_node.sleepFor(40) == 42);
 
-    auto exc = collectException!Exception(to_node.sleepFor(2000));
-    assert(exc !is null);
+    assertThrown!Exception(to_node.sleepFor(2000));
 }
 
 // request timeouts (foreign node to another node)
