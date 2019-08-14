@@ -1,30 +1,71 @@
 /*******************************************************************************
 
-    Provides utilities to mock an async REST node in unittests
+    Provides utilities to mock a network in unittests
 
-    Using `vibe.web.rest` allows to cleanly separate business code
-    from network code, as implementing an interface is all that's
-    needed to create a server.
+    This module is based on the idea that D `interface`s can be used
+    to represent a server's API, and that D `class` inheriting this `interface`
+    are used to define the server's business code,
+    abstracting away the communication layer.
 
-    However, in order for tests to simulate an asynchronous system
-    accurately, multiple nodes need to be able to run concurrently.
+    For example, a server that exposes an API to concatenate two strings would
+    define the following code:
+    ---
+    interface API { public string concat (string a, string b); }
+    class Server : API
+    {
+        public override string concat (string a, string b)
+        {
+            return a ~ b;
+        }
+    }
+    ---
+
+    Then one can use "generators" to define how multiple process communicate
+    together. One such generator, that pioneered this design is `vibe.web.rest`,
+    which allows to expose such servers as REST APIs.
+
+    `localrest` is another generator, which uses message passing and threads
+    to create a local "network".
+    The motivation was to create a testing library that could be used to
+    model a network at a much cheaper cost than spawning processes
+    (and containers) would be, when doing integration tests.
+
+    Control_Interface:
+    When instantiating a `RemoteAPI`, one has the ability to call foreign
+    implementations through auto-generated `override`s of the `interface`.
+    In addition to that, as this library is intended for testing,
+    a few extra functionalities are offered under a control interface,
+    accessible under the `ctrl` namespace in the instance.
+    The control interface allows to make the node unresponsive to one or all
+    methods, for some defined time or until unblocked.
+    See `sleep`, `filter`, and `clearFilter` for more details.
+
+    Event_Loop:
+    Server process usually needs to perform some action in an asynchronous way.
+    Additionally, some actions needs to be completed at a semi-regular interval,
+    for example based on a timer.
+    For those use cases, a node should call `runTask` or `sleep`, respectively.
+    Note that this has the same name (and purpose) as Vibe.d's core primitives.
+    Users should only ever call Vibe's `runTask` / `sleep` with `vibe.web.rest`,
+    or only call LocalRest's `runTask` / `sleep` with `RemoteAPI`.
+
+    Implementation:
+    In order for tests to simulate an asynchronous system accurately,
+    multiple nodes need to be able to run concurrently and asynchronously.
 
     There are two common solutions to this, to use either fibers or threads.
     Fibers have the advantage of being simpler to implement and predictable.
     Threads have the advantage of more accurately describing an asynchronous
     system and thus have the ability to uncover more issues.
-    Fibers also need to cooperate (by yielding), which means the code must
-    be more cautiously instrumented to allow it to be used for tests,
-    while Threads will just work.
 
-    The later reason is why this module went with Thread.
     When spawning a node, a thread is spawned, a node is instantiated with
     the provided arguments, and an event loop waits for messages sent
     to the Tid. Messages consist of the sender's Tid, the mangled name
     of the function to call (to support overloading) and the arguments,
     serialized as a JSON string.
 
-    While this module's main motivation was to test REST nodes,
+    Note:
+    While this module's original motivation was to test REST nodes,
     the only dependency to Vibe.d is actually to it's JSON module,
     as Vibe.d is the only available JSON module known to the author
     to provide an interface to deserialize composite types.
@@ -322,7 +363,8 @@ public final class RemoteAPI (API) : API
 
         Handler function
 
-        The filter
+        Performs the dispatch from `cmd` to the proper `node` function,
+        provided the function is not filtered.
 
         Params:
             cmd    = the command to run (contains the method name and the arguments)
