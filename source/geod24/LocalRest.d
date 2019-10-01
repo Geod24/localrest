@@ -112,6 +112,11 @@ private struct TimeCommand
     bool drop = false;
 }
 
+/// Ask the node to shut down
+private struct ShutdownCommand
+{
+}
+
 /// Filter out requests before they reach a node
 private struct FilterAPI
 {
@@ -680,6 +685,9 @@ public final class RemoteAPI (API) : API
                 {
                     C.receiveTimeout(10.msecs,
                         (C.OwnerTerminated e) { terminated = true; },
+                        (ShutdownCommand e) {
+                            terminated = true;
+                        },
                         (TimeCommand s)      {
                             control.sleep_until = Clock.currTime + s.dur;
                             control.drop = s.drop;
@@ -785,6 +793,17 @@ public final class RemoteAPI (API) : API
         public C.Tid tid () @nogc pure nothrow
         {
             return this.childTid;
+        }
+
+        /***********************************************************************
+
+            Send an async message to the thread to immediately shut down.
+
+        ***********************************************************************/
+
+        public void shutdown () @trusted
+        {
+            C.send(this.childTid, ShutdownCommand());
         }
 
         /***********************************************************************
@@ -993,6 +1012,7 @@ unittest
 
     scope test = RemoteAPI!API.spawn!MockAPI();
     assert(test.pubkey() == 42);
+    test.ctrl.shutdown();
 }
 
 /// In a real world usage, users will most likely need to use the registry
@@ -1031,7 +1051,7 @@ unittest
         private string lastCall;
     }
 
-    static API factory (string type, ulong hash)
+    static RemoteAPI!API factory (string type, ulong hash)
     {
         const name = hash.to!string;
         auto tid = std.concurrency.locate(name);
@@ -1070,6 +1090,8 @@ unittest
         node1.recv(Json.init);
         assert(node1.last() == "recv@1");
         assert(node2.last() == "pubkey");
+        node1.ctrl.shutdown();
+        node2.ctrl.shutdown();
         std.concurrency.send(parent, 42);
     }
 
@@ -1130,7 +1152,7 @@ unittest
         private ulong requests_;
     }
 
-    API[4] nodes;
+    RemoteAPI!API[4] nodes;
     auto master = RemoteAPI!API.spawn!MasterNode();
     nodes[0] = master;
     nodes[1] = RemoteAPI!API.spawn!SlaveNode(master.tid());
@@ -1152,6 +1174,8 @@ unittest
     }
 
     assert(nodes[0].requests() == 7);
+    import std.algorithm;
+    nodes.each!(node => node.ctrl.shutdown());
 }
 
 /// Support for circular nodes call
@@ -1201,6 +1225,9 @@ unittest
 
     // 7 level of re-entrancy
     assert(210 == nodes[0].call(20, 0));
+
+    import std.algorithm;
+    nodes.each!(node => node.ctrl.shutdown());
 }
 
 
@@ -1252,6 +1279,7 @@ unittest
     // (e.g. Travis Mac testers) so be safe
     assert(node.getCounter() >= 9);
     assert(node.getCounter() == 0);
+    node.ctrl.shutdown();
 }
 
 // Sane name insurance policy
@@ -1278,6 +1306,7 @@ unittest
         public string ctrl ();
     }
     static assert(!is(typeof(RemoteAPI!DoesntWork)));
+    node.ctrl.shutdown();
 }
 
 // Simulate temporary outage
@@ -1345,6 +1374,9 @@ unittest
         writeln("Sleep + non-blocking call: ", current3 - current2);
         writeln("Delta since sleep: ", current4 - current2);
     }
+
+    n1.ctrl.shutdown();
+    n2.ctrl.shutdown();
 }
 
 // Filter commands
@@ -1481,6 +1513,9 @@ unittest
     filtered.clearFilter();
     caller.foo();
     caller.bar(1);
+
+    filtered.ctrl.shutdown();
+    caller.ctrl.shutdown();
 }
 
 // request timeouts (from main thread)
@@ -1517,6 +1552,9 @@ unittest
     assert(to_node.sleepFor(40) == 42);
 
     assertThrown!Exception(to_node.sleepFor(2000));
+    Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
+    to_node.ctrl.shutdown();
+    node.ctrl.shutdown();
 }
 
 // request timeouts (foreign node to another node)
@@ -1555,6 +1593,8 @@ unittest
     auto node_2 = RemoteAPI!API.spawn!Node();
     node_tid = node_2.tid;
     node_1.check();
+    node_1.ctrl.shutdown();
+    node_2.ctrl.shutdown();
 }
 
 // request timeouts with dropped messages
@@ -1590,6 +1630,8 @@ unittest
     auto node_2 = RemoteAPI!API.spawn!Node();
     node_tid = node_2.tid;
     node_1.check();
+    node_1.ctrl.shutdown();
+    node_2.ctrl.shutdown();
 }
 
 // Test a node that gets a replay while it's delayed
@@ -1629,4 +1671,39 @@ unittest
     node_1.check();
     node_1.ctrl.sleep(300.msecs);
     assert(node_1.ping() == 42);
+    node_1.ctrl.shutdown();
+    node_2.ctrl.shutdown();
+}
+
+// Test explicit shutdown
+unittest
+{
+    import std.exception;
+
+    static interface API
+    {
+        int myping (int value);
+    }
+
+    static class Node : API
+    {
+        override int myping (int value)
+        {
+            return value;
+        }
+    }
+
+    auto node = RemoteAPI!API.spawn!Node(1.seconds);
+    assert(node.myping(42) == 42);
+    node.ctrl.shutdown();
+
+    try
+    {
+        node.myping(69);
+        assert(0);
+    }
+    catch (Exception ex)
+    {
+        assert(ex.msg == `"Request timed-out"`);
+    }
 }
