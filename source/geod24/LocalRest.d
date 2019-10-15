@@ -78,6 +78,8 @@
 
 module geod24.LocalRest;
 
+import geod24.VirtualClock;
+
 import vibe.data.json;
 
 static import C = geod24.concurrency;
@@ -110,6 +112,32 @@ private struct TimeCommand
     Duration dur;
     /// Whether or not affected messages should be dropped
     bool drop = false;
+}
+
+/// Ask the node for the time / pause / resume / offset its virtual clock time
+private struct GetTime
+{
+    /// Tid of the command-issuing thread
+    C.Tid tid;
+
+    /// will contain the time when the structure is returned
+    MonoTime time;
+}
+
+/// Ditto
+private struct PauseTime
+{
+}
+
+/// Ditto
+private struct ResumeTime
+{
+}
+
+/// Ditto
+private struct OffsetTime
+{
+    Duration offset;
 }
 
 /// Ask the node to shut down
@@ -351,6 +379,16 @@ private final class LocalScheduler : BaseFiberScheduler
     /// Request IDs waiting for a response
     private Waiting[ulong] waiting;
 
+    /// Clock
+    private VirtualClock clock;
+
+
+    /// Ctor
+    public this (VirtualClock clock) nothrow @nogc @safe
+    {
+        this.clock = clock;
+    }
+
     /// Should never be called from outside
     public override Condition newCondition(Mutex m = null) nothrow
     {
@@ -412,11 +450,13 @@ private final class LocalScheduler : BaseFiberScheduler
 
         override bool wait(Duration period) nothrow
         {
+            scope (failure) assert(0);
             scope (exit) notified = false;
 
-            for (auto limit = MonoTime.currTime + period;
+
+            for (auto limit = this.outer.clock.currTime + period;
                  !notified && !period.isNegative;
-                 period = limit - MonoTime.currTime)
+                 period = limit - this.outer.clock.currTime)
             {
                 this.outer.yield();
             }
@@ -630,7 +670,7 @@ public final class RemoteAPI (API) : API
         import std.range;
 
         scope node = new Implementation(cargs);
-        scheduler = new LocalScheduler;
+        scheduler = new LocalScheduler(new VirtualClock);
         scope exc = new Exception("You should never see this exception - please report a bug");
 
         // very simple & limited variant, to keep it performant.
@@ -696,6 +736,23 @@ public final class RemoteAPI (API) : API
                         (TimeCommand s)      {
                             control.sleep_until = Clock.currTime + s.dur;
                             control.drop = s.drop;
+                        },
+                        (GetTime gt)
+                        {
+                            C.send(gt.tid,
+                                GetTime(C.thisTid(), scheduler.clock.currTime));
+                        },
+                        (PauseTime pt)
+                        {
+                            scheduler.clock.pause();
+                        },
+                        (ResumeTime rt)
+                        {
+                            scheduler.clock.resume();
+                        },
+                        (OffsetTime ot)
+                        {
+                            scheduler.clock.addTimeOffset(ot.offset);
                         },
                         (FilterAPI filter_api) {
                             control.filter = filter_api;
@@ -834,6 +891,70 @@ public final class RemoteAPI (API) : API
 
         /***********************************************************************
 
+            Returns:
+                the current virtual clock time for the node
+
+        ***********************************************************************/
+
+        public MonoTime getTime () @trusted
+        {
+            C.send(this.childTid, GetTime(C.thisTid()));
+            MonoTime time;
+
+            bool received;
+            while (!received)
+            {
+                C.receiveTimeout(10.msecs,
+                    (GetTime gt)
+                    {
+                        time = gt.time;
+                        received = true;
+                    });
+            }
+
+            return time;
+        }
+
+        /***********************************************************************
+
+            Pauses the virtual clock of the node
+
+        ***********************************************************************/
+
+        public void pauseTime () @trusted
+        {
+            C.send(this.childTid, PauseTime());
+        }
+
+        /***********************************************************************
+
+            Resumes the virtual clock of the node
+
+        ***********************************************************************/
+
+        public void resumeTime () @trusted
+        {
+            C.send(this.childTid, ResumeTime());
+        }
+
+        /***********************************************************************
+
+            Offsets the current virtual clock time of the node
+
+            Note: To travel "back in time", provide a negative duration.
+
+            Params:
+                duration = the duration to offset the time with (can be negative)
+
+        ***********************************************************************/
+
+        public void offsetTime (Duration duration) @trusted
+        {
+            C.send(this.childTid, OffsetTime(duration));
+        }
+
+        /***********************************************************************
+
             Filter any requests issued to the provided method.
 
             Calling the API endpoint will throw an exception,
@@ -941,7 +1062,7 @@ public final class RemoteAPI (API) : API
                     // we are in the main thread
                     if (scheduler is null)
                     {
-                        scheduler = new LocalScheduler;
+                        scheduler = new LocalScheduler(new VirtualClock);
                         is_main_thread = true;
                     }
 
@@ -1809,4 +1930,84 @@ unittest
     {
         assert(ex.msg == `"Request timed-out"`);
     }
+}
+
+/// Virtual clock time manipulation
+unittest
+{
+    interface API
+    {
+        int getValue ();
+        void sleepThenSet ( Duration time, int value );
+    }
+
+    static class Node : API
+    {
+        int value;
+        int new_value;
+        Duration time;
+
+        override int getValue () { return value; }
+
+        override void sleepThenSet ( Duration time, int value )
+        {
+            this.time = time;
+            this.new_value = value;
+
+            // runs in background, to unblock parent thread
+            runTask(&this.task);
+        }
+
+        void task ()
+        {
+            sleep(this.time);
+            this.value = new_value;
+        }
+    }
+
+    auto node = RemoteAPI!API.spawn!Node();
+    assert(node.getValue() == 0);
+
+    // note: must be called first due to timing issues
+    node.ctrl.pauseTime();
+    auto last_time = node.ctrl.getTime();
+    node.sleepThenSet(1.seconds, 42);
+    Thread.sleep(2.seconds);
+    assert(node.ctrl.getTime() == last_time);
+
+    // time was stopped, node cannot make progress
+    assert(node.getValue() == 0);
+
+    node.ctrl.resumeTime();
+    Thread.sleep(2.seconds);
+    assert(node.ctrl.getTime() != last_time);  // time was resumed
+
+    // time was resumed, node woke up and set the value
+    assert(node.getValue() == 42);
+
+    node.ctrl.pauseTime();
+    node.sleepThenSet(1.seconds, 69);
+    Thread.sleep(2.seconds);
+
+    // time was stopped, node cannot make progress
+    assert(node.getValue() == 42);
+
+    node.ctrl.offsetTime(2.seconds);
+    Thread.sleep(500.msecs);
+
+    // time was forcefully increased, value was changed
+    assert(node.getValue() == 69);
+
+    node.sleepThenSet(100.msecs, 420);
+    Thread.sleep(1.seconds);
+
+    // time is still paused
+    assert(node.getValue() == 69);
+
+    node.ctrl.resumeTime();
+    Thread.sleep(1.seconds);
+
+    // time has continued
+    assert(node.getValue() == 420);
+    node.ctrl.shutdown();
 }
