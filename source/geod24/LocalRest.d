@@ -1597,6 +1597,48 @@ unittest
     node_2.ctrl.shutdown();
 }
 
+// test-case for zombie responses
+unittest
+{
+    static import std.concurrency;
+    import std.exception;
+
+    __gshared C.Tid node_tid;
+
+    static interface API
+    {
+        void check ();
+        int get42 ();
+        int get69 ();
+    }
+
+    static class Node : API
+    {
+        override int get42 () { return 42; }
+        override int get69 () { return 69; }
+
+        override void check ()
+        {
+            auto node = new RemoteAPI!API(node_tid, 500.msecs);
+
+            // time-out
+            node.ctrl.sleep(2000.msecs);
+            assertThrown!Exception(node.get42());
+
+            // no time-out
+            node.ctrl.sleep(10.msecs);
+            assert(node.get69() == 42);  // bug: should return 69
+        }
+    }
+
+    auto node_1 = RemoteAPI!API.spawn!Node();
+    auto node_2 = RemoteAPI!API.spawn!Node();
+    node_tid = node_2.tid;
+    node_1.check();
+    node_1.ctrl.shutdown();
+    node_2.ctrl.shutdown();
+}
+
 // request timeouts with dropped messages
 unittest
 {
