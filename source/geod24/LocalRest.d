@@ -347,9 +347,9 @@ private final class LocalScheduler : BaseFiberScheduler
 
     /// The 'Response' we are currently processing, if any
     private Response pending;
-    /// List of Condition for blocked queries
-    /// Some entries might be empty (we never size it down)
-    private Waiting[] waiting;
+
+    /// Request IDs waiting for a response
+    private Waiting[ulong] waiting;
 
     /// Should never be called from outside
     public override Condition newCondition(Mutex m = null) nothrow
@@ -360,19 +360,14 @@ private final class LocalScheduler : BaseFiberScheduler
     /// Get the next available request ID
     public size_t getNextResponseId ()
     {
-        // Try to find one in the array
-        foreach (idx, ref val; this.waiting)
-            if (!val.busy)
-                return idx;
-        return this.waiting.length;
+        static size_t last_idx;
+        return last_idx++;
     }
 
     public Response waitResponse (size_t id, Duration duration) nothrow
     {
-        if (id == this.waiting.length)
-            this.waiting ~= Waiting(new FiberCondition, false);
-        else if (id > this.waiting.length)
-            assert(0, "This should never happend");
+        if (id !in this.waiting)
+            this.waiting[id] = Waiting(new FiberCondition, false);
 
         Waiting* ptr = &this.waiting[id];
         if (ptr.busy)
@@ -390,6 +385,12 @@ private final class LocalScheduler : BaseFiberScheduler
         // After control returns to us, `pending` has been filled
         scope(exit) this.pending = Response.init;
         return this.pending;
+    }
+
+    /// Called when a waiting condition was handled and can be safely removed
+    public void remove (size_t id)
+    {
+        this.waiting.remove(id);
     }
 
     /// Override `FiberScheduler.FiberCondition` to avoid mutexes
@@ -671,6 +672,7 @@ public final class RemoteAPI (API) : API
             {
                 scheduler.pending = arg;
                 scheduler.waiting[arg.id].c.notify();
+                scheduler.remove(arg.id);
             }
             else static assert(0, "Unhandled type: " ~ T.stringof);
         }
@@ -1627,7 +1629,7 @@ unittest
 
             // no time-out
             node.ctrl.sleep(10.msecs);
-            assert(node.get69() == 42);  // bug: should return 69
+            assert(node.get69() == 69);
         }
     }
 
