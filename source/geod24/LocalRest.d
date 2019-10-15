@@ -1559,6 +1559,50 @@ unittest
     node.ctrl.shutdown();
 }
 
+// test-case for responses to re-used requests (from main thread)
+unittest
+{
+    import core.thread;
+    import std.exception;
+
+    static interface API
+    {
+        float getFloat();
+        size_t sleepFor (long dur);
+    }
+
+    static class Node : API
+    {
+        override float getFloat() { return 69.69; }
+        override size_t sleepFor (long dur)
+        {
+            Thread.sleep(msecs(dur));
+            return 42;
+        }
+    }
+
+    // node with no timeout
+    auto node = RemoteAPI!API.spawn!Node();
+    assert(node.sleepFor(80) == 42);  // no timeout
+
+    // node with a configured timeout
+    auto to_node = RemoteAPI!API.spawn!Node(500.msecs);
+
+    /// none of these should time out
+    assert(to_node.sleepFor(10) == 42);
+    assert(to_node.sleepFor(20) == 42);
+    assert(to_node.sleepFor(30) == 42);
+    assert(to_node.sleepFor(40) == 42);
+
+    assertThrown!Exception(to_node.sleepFor(2000));
+    Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
+    import std.stdio;
+    assert(to_node.getFloat() == 42);  // bug: should return 69.69, not 42
+
+    to_node.ctrl.shutdown();
+    node.ctrl.shutdown();
+}
+
 // request timeouts (foreign node to another node)
 unittest
 {
