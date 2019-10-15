@@ -444,6 +444,9 @@ private final class LocalScheduler : BaseFiberScheduler
 /// However, the one in `std.concurrency` is process-global (`__gshared`)
 private LocalScheduler scheduler;
 
+/// Whether this is the main thread
+private bool is_main_thread;
+
 
 /*******************************************************************************
 
@@ -935,43 +938,51 @@ public final class RemoteAPI (API) : API
             mixin(q{
                 override ReturnType!(ovrld) } ~ member ~ q{ (Parameters!ovrld params)
                 {
-                    auto serialized = ArgWrapper!(Parameters!ovrld)(params)
-                        .serializeToJsonString();
-                    auto command = Command(C.thisTid(), size_t.max, ovrld.mangleof, serialized);
+                    // we are in the main thread
+                    if (scheduler is null)
+                    {
+                        scheduler = new LocalScheduler;
+                        is_main_thread = true;
+                    }
+
                     // `std.concurrency.send/receive[Only]` is not `@safe` but
                     // this overload needs to be
                     auto res = () @trusted {
-                        // We're in the main thread / client, no re-entrancy,
-                        // and no scheduler in sight, so KISS
-                        if (scheduler is null)
-                        {
-                            C.send(this.childTid, command);
+                        auto serialized = ArgWrapper!(Parameters!ovrld)(params)
+                            .serializeToJsonString();
 
-                            if (this.timeout == Duration.init)
-                            {
-                                return C.receiveOnly!(Response);
-                            }
-                            else
-                            {
-                                Response actual_res;
-                                if (C.receiveTimeout(this.timeout,
-                                    (Response res)
-                                    {
-                                        actual_res = res;
-                                    }))
-                                {
-                                    return actual_res;
-                                }
-
-                                return Response(Status.Timeout, command.id);
-                            }
-                        }
-
-                        // Scheduler / re-entrant path
-                        command.id = scheduler.getNextResponseId();
+                        auto command = Command(C.thisTid(), scheduler.getNextResponseId(), ovrld.mangleof, serialized);
                         C.send(this.childTid, command);
-                        auto res = scheduler.waitResponse(command.id, this.timeout);
-                        return res;
+
+                        // for the main thread, we run the "event loop" until
+                        // the request we're interested in receives a response.
+                        if (is_main_thread)
+                        {
+                            bool terminated = false;
+                            runTask(() {
+                                while (!terminated)
+                                {
+                                    C.receiveTimeout(10.msecs,
+                                        (Response res) {
+                                            scheduler.pending = res;
+                                            scheduler.waiting[res.id].c.notify();
+                                        });
+
+                                    scheduler.yield();
+                                }
+                            });
+
+                            Response res;
+                            scheduler.start(() {
+                                res = scheduler.waitResponse(command.id, this.timeout);
+                                terminated = true;
+                            });
+                            return res;
+                        }
+                        else
+                        {
+                            return scheduler.waitResponse(command.id, this.timeout);
+                        }
                     }();
 
                     if (res.status == Status.Failed)
@@ -1597,7 +1608,7 @@ unittest
     assertThrown!Exception(to_node.sleepFor(2000));
     Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
     import std.stdio;
-    assert(to_node.getFloat() == 42);  // bug: should return 69.69, not 42
+    assert(cast(int)to_node.getFloat() == 69);
 
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
