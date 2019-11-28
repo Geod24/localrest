@@ -330,7 +330,7 @@ class TidMissingException : Exception
  */
 struct Tid
 {
-private:
+package:
     this(MessageBox m) @safe pure nothrow @nogc
     {
         mbox = m;
@@ -986,112 +986,6 @@ void setMaxMailboxSize(Tid tid, size_t messages, bool function(Tid) onCrowdingDo
     tid.mbox.setMaxMsgs(messages, onCrowdingDoThis);
 }
 
-private
-{
-    __gshared Tid[string] tidByName;
-    __gshared string[][Tid] namesByTid;
-}
-
-private @property Mutex registryLock()
-{
-    __gshared Mutex impl;
-    initOnce!impl(new Mutex);
-    return impl;
-}
-
-private void unregisterMe()
-{
-    auto me = thisInfo.ident;
-    if (thisInfo.ident != Tid.init)
-    {
-        synchronized (registryLock)
-        {
-            if (auto allNames = me in namesByTid)
-            {
-                foreach (name; *allNames)
-                    tidByName.remove(name);
-                namesByTid.remove(me);
-            }
-        }
-    }
-}
-
-/**
- * Associates name with tid.
- *
- * Associates name with tid in a process-local map.  When the thread
- * represented by tid terminates, any names associated with it will be
- * automatically unregistered.
- *
- * Params:
- *  name = The name to associate with tid.
- *  tid  = The tid register by name.
- *
- * Returns:
- *  true if the name is available and tid is not known to represent a
- *  defunct thread.
- */
-bool register(string name, Tid tid)
-{
-    synchronized (registryLock)
-    {
-        if (name in tidByName)
-            return false;
-        if (tid.mbox.isClosed)
-            return false;
-        namesByTid[tid] ~= name;
-        tidByName[name] = tid;
-        return true;
-    }
-}
-
-/**
- * Removes the registered name associated with a tid.
- *
- * Params:
- *  name = The name to unregister.
- *
- * Returns:
- *  true if the name is registered, false if not.
- */
-bool unregister(string name)
-{
-    import std.algorithm.mutation : remove, SwapStrategy;
-    import std.algorithm.searching : countUntil;
-
-    synchronized (registryLock)
-    {
-        if (auto tid = name in tidByName)
-        {
-            auto allNames = *tid in namesByTid;
-            auto pos = countUntil(*allNames, name);
-            remove!(SwapStrategy.unstable)(*allNames, pos);
-            tidByName.remove(name);
-            return true;
-        }
-        return false;
-    }
-}
-
-/**
- * Gets the Tid associated with name.
- *
- * Params:
- *  name = The name to locate within the registry.
- *
- * Returns:
- *  The associated Tid or Tid.init if name is not registered.
- */
-Tid locate(string name)
-{
-    synchronized (registryLock)
-    {
-        if (auto tid = name in tidByName)
-            return *tid;
-        return Tid.init;
-    }
-}
-
 /**
  * Encapsulates all implementation-level data needed for scheduling.
  *
@@ -1133,7 +1027,6 @@ struct ThreadInfo
             _send(MsgType.linkDead, tid, ident);
         if (owner != Tid.init)
             _send(MsgType.linkDead, owner, ident);
-        unregisterMe(); // clean up registry entries
     }
 }
 
@@ -1884,7 +1777,7 @@ void yield(T)(T value)
     assert(counter == [7, 21]);
 }
 
-private
+package
 {
     /*
      * A MessageBox is a message queue for one thread.  Other threads may send

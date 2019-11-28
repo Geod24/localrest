@@ -1033,6 +1033,10 @@ unittest
 {
     import std.conv;
     static import geod24.concurrency;
+    import geod24.Registry;
+
+    __gshared Registry registry;
+    registry.initialize();
 
     static interface API
     {
@@ -1067,7 +1071,7 @@ unittest
     static RemoteAPI!API factory (string type, ulong hash)
     {
         const name = hash.to!string;
-        auto tid = geod24.concurrency.locate(name);
+        auto tid = registry.locate(name);
         if (tid != tid.init)
             return new RemoteAPI!API(tid);
 
@@ -1075,11 +1079,11 @@ unittest
         {
         case "normal":
             auto ret =  RemoteAPI!API.spawn!Node(false);
-            geod24.concurrency.register(name, ret.tid());
+            registry.register(name, ret.tid());
             return ret;
         case "byzantine":
             auto ret =  RemoteAPI!API.spawn!Node(true);
-            geod24.concurrency.register(name, ret.tid());
+            registry.register(name, ret.tid());
             return ret;
         default:
             assert(0, type);
