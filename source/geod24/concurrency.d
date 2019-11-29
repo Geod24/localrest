@@ -46,7 +46,7 @@ import core.time : MonoTime;
 import core.thread;
 
 ///
-@system unittest
+version (none) @system unittest
 {
     __gshared string received;
     static void spawnedFunc (Tid ownerTid)
@@ -92,7 +92,7 @@ private
         return doesIt;
     }
 
-    @safe unittest
+    version (none) @safe unittest
     {
         static struct Container { Tid t; }
         static assert(!hasLocalAliasing!(Tid, Container, int));
@@ -332,7 +332,7 @@ struct Tid
     }
 }
 
-@system unittest
+version (none) @system unittest
 {
     // text!Tid is @system
     import std.conv : text;
@@ -376,7 +376,7 @@ struct Tid
     return thisInfo.owner;
 }
 
-@system unittest
+version (none) @system unittest
 {
     import std.exception : assertThrown;
 
@@ -451,7 +451,7 @@ if (isSpawnable!(F, T))
 }
 
 ///
-@system unittest
+version (none) @system unittest
 {
     static void f (string msg)
     {
@@ -462,7 +462,7 @@ if (isSpawnable!(F, T))
 }
 
 /// Fails: char[] has mutable aliasing.
-@system unittest
+version (none) @system unittest
 {
     string msg = "Hello, World!";
 
@@ -476,7 +476,7 @@ if (isSpawnable!(F, T))
 }
 
 /// New thread with anonymous function
-@system unittest
+version (none) @system unittest
 {
     spawn({
         ownerTid.send("This is so great!");
@@ -484,7 +484,7 @@ if (isSpawnable!(F, T))
     assert(receiveOnly!string == "This is so great!");
 }
 
-@system unittest
+version (none) @system unittest
 {
     import core.thread : thread_joinAll;
 
@@ -579,7 +579,7 @@ if (isSpawnable!(F, T))
     return spawnTid;
 }
 
-@system unittest
+version (none) @system unittest
 {
     void function() fn1;
     void function(int) fn2;
@@ -701,7 +701,7 @@ do
 }
 
 ///
-@system unittest
+version (none) @system unittest
 {
     import std.variant : Variant;
 
@@ -742,7 +742,7 @@ do
     }
 }
 
-@safe unittest
+version (none) @safe unittest
 {
     static assert( __traits( compiles,
                       {
@@ -762,11 +762,11 @@ do
 }
 
 // Make sure receive() works with free functions as well.
-version (unittest)
+version (none) version (unittest)
 {
     private void receiveFunction(int x) {}
 }
-@safe unittest
+version (none) @safe unittest
 {
     static assert( __traits( compiles,
                       {
@@ -848,7 +848,7 @@ do
 }
 
 ///
-@system unittest
+version (none) @system unittest
 {
     auto tid = spawn(
     {
@@ -858,7 +858,7 @@ do
 }
 
 ///
-@system unittest
+version (none) @system unittest
 {
     auto tid = spawn(
     {
@@ -868,7 +868,7 @@ do
 }
 
 ///
-@system unittest
+version (none) @system unittest
 {
     struct Record { string name; int age; }
 
@@ -883,7 +883,7 @@ do
     send(tid, 0.5, Record("Alice", 31));
 }
 
-@system unittest
+version (none) @system unittest
 {
     static void t1 (Tid mainTid)
     {
@@ -929,7 +929,7 @@ do
     return thisInfo.ident.mbox.get(duration, ops);
 }
 
-@safe unittest
+version (none) @safe unittest
 {
     static assert(__traits(compiles, {
         receiveTimeout(msecs(0), (Variant x) {});
@@ -1541,7 +1541,7 @@ private:
     size_t m_pos;
 }
 
-@system unittest
+version (none) @system unittest
 {
     static void receive (Condition cond, ref size_t received)
     {
@@ -1840,7 +1840,7 @@ private:
 }
 
 ///
-@system unittest
+version (none) @system unittest
 {
     auto tid = spawn ({
         int i;
@@ -1888,7 +1888,7 @@ void yield (T) (T value)
     yield(value);
 }
 
-@system unittest
+version (none) @system unittest
 {
     import core.exception;
     import std.exception;
@@ -1937,7 +1937,7 @@ void yield (T) (T value)
     testScheduler(new FiberScheduler);
 }
 ///
-@system unittest
+version (none) @system unittest
 {
     import std.range;
 
@@ -2512,7 +2512,7 @@ auto ref initOnce (alias var) (lazy typeof(var) init)
 }
 
 /// A typical use-case is to perform lazy but thread-safe initialization.
-@system unittest
+version (none) @system unittest
 {
     static class MySingleton
     {
@@ -2526,7 +2526,7 @@ auto ref initOnce (alias var) (lazy typeof(var) init)
     assert(MySingleton.instance !is null);
 }
 
-@system unittest
+version (none) @system unittest
 {
     static class MySingleton
     {
@@ -2600,7 +2600,7 @@ auto ref initOnce (alias var) (lazy typeof(var) init, Mutex mutex)
 }
 
 /// Use a separate mutex when init blocks on another thread that might also call initOnce.
-@system unittest
+version (none) @system unittest
 {
     import core.sync.mutex : Mutex;
 
@@ -2620,7 +2620,7 @@ auto ref initOnce (alias var) (lazy typeof(var) init, Mutex mutex)
     assert(varB == true);
 }
 
-@system unittest
+version (none) @system unittest
 {
     static shared bool a;
     __gshared bool b;
@@ -2633,7 +2633,7 @@ auto ref initOnce (alias var) (lazy typeof(var) init, Mutex mutex)
 }
 
 // test ability to send shared arrays
-@system unittest
+version (none) @system unittest
 {
     static shared int[] x = new shared(int)[1];
     auto tid = spawn({
@@ -2645,3 +2645,37 @@ auto ref initOnce (alias var) (lazy typeof(var) init, Mutex mutex)
     receiveOnly!(bool);
     assert(x[0] == 5);
 }
+
+//unittest
+//{
+//    import std.concurrency;
+//    import std.stdio;
+
+//    auto process = ()
+//    {
+//        size_t message_count = 2;
+//        while (message_count--)
+//        {
+//            receive(
+//                (int i)     { writefln("Child thread received int: %s", i);
+//                              ownerTid.send(i); },
+//                (string s)  { writefln("Child thread received string: %s", s);
+//                              ownerTid.send(s); }
+//            );
+//        }
+//    };
+
+//    auto tid = spawn(process);
+//    send(tid, 42);
+//    send(tid, "string");
+
+//    receive(
+//        (int s)  { writefln("Main thread received int: %s", s); }
+//    );
+
+//    receive(
+//        (string s)  { writefln("Main thread received string: %s", s); }
+//    );
+
+//    writeln("Done");
+//}
