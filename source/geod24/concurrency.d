@@ -2646,36 +2646,43 @@ version (none) @system unittest
     assert(x[0] == 5);
 }
 
-//unittest
-//{
-//    import std.concurrency;
-//    import std.stdio;
+unittest
+{
+    import std.concurrency;
+    import std.stdio;
 
-//    auto process = ()
-//    {
-//        size_t message_count = 2;
-//        while (message_count--)
-//        {
-//            receive(
-//                (int i)     { writefln("Child thread received int: %s", i);
-//                              ownerTid.send(i); },
-//                (string s)  { writefln("Child thread received string: %s", s);
-//                              ownerTid.send(s); }
-//            );
-//        }
-//    };
+    auto process = ()
+    {
+        size_t message_count = 2;
+        while (message_count--)
+        {
+            receive(
+                (int i)     { writefln("Child thread received int: %s", i);
+                              ownerTid.send(i); },
+                (string s)  { writefln("Child thread received string: %s", s);
+                              ownerTid.send(s); }
+            );
+        }
+    };
 
-//    auto tid = spawn(process);
-//    send(tid, 42);
-//    send(tid, "string");
+    auto tid = spawn(process);
+    send(tid, 42);
+    send(tid, "string");
 
-//    receive(
-//        (int s)  { writefln("Main thread received int: %s", s); }
-//    );
+    int got_i;
+    string got_s;
 
-//    receive(
-//        (string s)  { writefln("Main thread received string: %s", s); }
-//    );
+    Thread.sleep(50.msecs);
 
-//    writeln("Done");
-//}
+    receive(
+        (string s)  { got_s = s; writefln("Main thread received string: %s", s); }
+    );
+
+    receive(
+        (int i)  { got_i = i; writefln("Main thread received int: %s", i); }
+    );
+
+    assert(got_i == 42);
+    assert(got_s == "string");
+    writeln("Done");
+}
