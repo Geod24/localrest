@@ -31,8 +31,9 @@
 
 *******************************************************************************/
 
-module std.concurrency;
+module geod24.concurrency;
 
+import std.container;
 import std.range.primitives;
 import std.range.interfaces : InputRange;
 import std.traits;
@@ -41,6 +42,7 @@ public import std.variant;
 import core.atomic;
 import core.sync.condition;
 import core.sync.mutex;
+import core.time : MonoTime;
 import core.thread;
 
 ///
@@ -99,7 +101,6 @@ private
     enum MsgType
     {
         standard,
-        priority,
         linkDead,
     }
 
@@ -107,6 +108,8 @@ private
     {
         MsgType type;
         Variant data;
+        /// It is necessary to measure the wait time.
+        MonoTime create_time;
 
         this (T...) (MsgType t, T vals)
         if (T.length > 0)
@@ -123,6 +126,7 @@ private
                 type = t;
                 data = Tuple!(T)(vals);
             }
+            create_time = MonoTime.currTime;
         }
 
         @property auto convertsTo (T...) ()
@@ -298,9 +302,20 @@ class TidMissingException : Exception
 struct Tid
 {
     private MessageBox mbox;
+    public Duration timeout;
+    public bool shutdown;
+
     private this (MessageBox m) @safe pure nothrow @nogc
     {
         mbox = m;
+        timeout = Duration.init;
+        shutdown = false;
+    }
+
+    public void setTimeout (Duration d) @safe pure nothrow @nogc
+    {
+        this.timeout = d;
+        mbox.setTimeout(d);
     }
 
     /**
@@ -626,23 +641,6 @@ void send (T...) (Tid tid, T vals)
     _send(tid, vals);
 }
 
-/*******************************************************************************
-
-    Places the values as a message on the front of tid's message queue.
-
-    Send a message to `tid` but place it at the front of `tid`'s message
-    queue instead of at the back.  This function is typically used for
-    out-of-band communication, to signal exceptional conditions, etc.
-
-*******************************************************************************/
-
-void prioritySend (T...) (Tid tid, T vals)
-{
-    static assert(!hasLocalAliasing!(T),
-        "Aliases to mutable thread-local data not allowed.");
-    _send(MsgType.priority, tid, vals);
-}
-
 /// Ditto
 private void _send (T...) (Tid tid, T vals)
 {
@@ -659,7 +657,12 @@ private void _send (T...) (Tid tid, T vals)
 private void _send (T...) (MsgType type, Tid tid, T vals)
 {
     auto msg = Message(type, vals);
-    tid.mbox.put(msg);
+    if (Fiber.getThis())
+        tid.mbox.put(msg);
+    else
+        new Fiber({
+            tid.mbox.put(msg);
+        }).call();
 }
 
 /*******************************************************************************
@@ -689,7 +692,12 @@ do
 {
     checkops(ops);
 
-    thisInfo.ident.mbox.get(ops);
+    if (Fiber.getThis())
+        thisInfo.ident.mbox.get(ops);
+    else
+        new Fiber({
+            thisInfo.ident.mbox.get(ops);
+        }).call();
 }
 
 ///
@@ -972,58 +980,6 @@ private
     {
         return false;
     }
-}
-
-/*******************************************************************************
-
-    Sets a maximum mailbox size.
-
-    Sets a limit on the maximum number of user messages allowed in the mailbox.
-    If this limit is reached, the caller attempting to add a new message will
-    execute the behavior specified by doThis.  If messages is zero, the mailbox
-    is unbounded.
-
-    Params:
-        tid      = The Tid of the thread for which this limit should be set.
-        messages = The maximum number of messages or zero if no limit.
-        doThis   = The behavior executed when a message is sent to a full
-                   mailbox.
-
-*******************************************************************************/
-
-void setMaxMailboxSize (Tid tid, size_t messages, OnCrowding doThis) @safe pure
-{
-    final switch (doThis)
-    {
-        case OnCrowding.block:
-            return tid.mbox.setMaxMsgs(messages, &onCrowdingBlock);
-        case OnCrowding.throwException:
-            return tid.mbox.setMaxMsgs(messages, &onCrowdingThrow);
-        case OnCrowding.ignore:
-            return tid.mbox.setMaxMsgs(messages, &onCrowdingIgnore);
-    }
-}
-
-
-/*******************************************************************************
-
-    Sets a maximum mailbox size.
-
-    Sets a limit on the maximum number of user messages allowed in the mailbox.
-    If this limit is reached, the caller attempting to add a new message will
-    execute onCrowdingDoThis.  If messages is zero, the mailbox is unbounded.
-
-    Params:
-        tid      = The Tid of the thread for which this limit should be set.
-        messages = The maximum number of messages or zero if no limit.
-        onCrowdingDoThis = The routine called when a message is sent to a full
-        mailbox.
-
-*******************************************************************************/
-
-void setMaxMailboxSize (Tid tid, size_t messages, bool function(Tid) onCrowdingDoThis)
-{
-    tid.mbox.setMaxMsgs(messages, onCrowdingDoThis);
 }
 
 private
@@ -2021,8 +1977,7 @@ private
         A MessageBox is a message queue for one thread.  Other threads may send
         messages to this owner by calling put(), and the owner receives them by
         calling get().  The put() call is therefore effectively shared and the
-        get() call is effectively local.  setMaxMsgs may be used by any thread
-        to limit the size of the message queue.
+        get() call is effectively local.
 
     ***************************************************************************/
 
@@ -2030,53 +1985,42 @@ private
     {
         this () @trusted nothrow /* TODO: make @safe after relevant druntime PR gets merged */
         {
-            m_lock = new Mutex;
-            m_closed = false;
+            this.mutex = new Mutex();
 
-            if (scheduler is null)
-            {
-                m_putMsg = new Condition(m_lock);
-                m_notFull = new Condition(m_lock);
-            }
-            else
-            {
-                m_putMsg = scheduler.newCondition(m_lock);
-                m_notFull = scheduler.newCondition(m_lock);
-            }
-        }
-
-        ///
-        final @property bool isClosed () @safe @nogc pure
-        {
-            synchronized (m_lock)
-            {
-                return m_closed;
-            }
+            this.closed = false;
+            this.timeout = Duration.init;
         }
 
         /***********************************************************************
 
-            Sets a limit on the maximum number of user messages allowed in the
-            mailbox.  If this limit is reached, the caller attempting to add
-            a new message will execute call.  If num is zero, there is no limit
-            on the message queue.
+            Sets the time of the timeout.
 
-            Params:
-                num  = The maximum size of the queue or zero if the queue is
-                       unbounded.
-                call = The routine to call when the queue is full.
+            Returns:
+                timeout = if it is closed, return true.
 
         ***********************************************************************/
 
-        final void setMaxMsgs (size_t num, bool function(Tid) call) @safe @nogc pure
+        public void setTimeout (Duration timeout) @safe pure nothrow @nogc
         {
-            synchronized (m_lock)
-            {
-                m_maxMsgs = num;
-                m_onMaxMsgs = call;
-            }
+            this.timeout = timeout;
         }
 
+        /***********************************************************************
+
+            Returns whether MessageBox is closed or not.
+
+            Returns:
+                if it is closed, return true.
+
+        ***********************************************************************/
+
+        public @property bool isClosed () @safe @nogc pure
+        {
+            synchronized (this.mutex)
+            {
+                return this.closed;
+            }
+        }
 
         /***********************************************************************
 
@@ -2095,38 +2039,159 @@ private
 
         ***********************************************************************/
 
-        final void put (ref Message msg)
+        public bool put (ref Message msg)
         {
-            synchronized (m_lock)
+            import std.algorithm;
+            import std.range : popBackN, walkLength;
+
+            this.mutex.lock();
+            if (this.closed)
             {
-                // TODO: Generate an error here if m_closed is true, or maybe
-                //       put a message in the caller's queue?
-                if (!m_closed)
+                this.mutex.unlock();
+                return false;
+            }
+
+            if (this.recvq[].walkLength > 0)
+            {
+                SudoFiber sf = this.recvq.front;
+                this.recvq.removeFront();
+                *(sf.msg_ptr) = msg;
+
+                if (sf.swdg !is null)
+                    sf.swdg();
+
+                this.mutex.unlock();
+
+                return true;
+            }
+
+            {
+                shared(bool) is_waiting = true;
+                void stopWait1() {
+                    is_waiting = false;
+                }
+
+                SudoFiber new_sf;
+                new_sf.msg = msg;
+                new_sf.swdg = &stopWait1;
+                new_sf.create_time = MonoTime.currTime;
+
+                this.sendq.insertBack(new_sf);
+                this.mutex.unlock();
+
+                if (this.timeout > Duration.init)
                 {
-                    while (true)
+                    auto start = MonoTime.currTime;
+                    while (is_waiting)
                     {
-                        if (isPriorityMsg(msg))
+                        auto end = MonoTime.currTime();
+                        auto elapsed = end - start;
+                        if (elapsed > this.timeout)
                         {
-                            m_sharedPty.put(msg);
-                            m_putMsg.notify();
-                            return;
+                            // remove timeout element
+                            this.mutex.lock();
+                            auto range = find(this.sendq[], new_sf);
+                            if (!range.empty)
+                            {
+                                popBackN(range, range.walkLength-1);
+                                this.sendq.remove(range);
+                            }
+                            this.mutex.unlock();
+                            return false;
                         }
-                        if (!mboxFull() || isControlMsg(msg))
-                        {
-                            m_sharedBox.put(msg);
-                            m_putMsg.notify();
-                            return;
-                        }
-                        if (m_onMaxMsgs !is null && !m_onMaxMsgs(thisTid))
-                        {
-                            return;
-                        }
-                        m_putQueue++;
-                        m_notFull.wait();
-                        m_putQueue--;
+
+                        if (Fiber.getThis())
+                            Fiber.yield();
+                        Thread.sleep(1.msecs);
+                    }
+                }
+                else
+                {
+                    while (is_waiting)
+                    {
+                        if (Fiber.getThis())
+                            Fiber.yield();
+                        Thread.sleep(1.msecs);
                     }
                 }
             }
+
+            return true;
+        }
+
+        /***********************************************************************
+
+            Get a message from the queue.
+
+            Params:
+                msg = The message to get in the queue.
+
+            Returns:
+                If successful, return true.
+
+        ***********************************************************************/
+
+        private bool getMessage (Message* msg)
+        {
+            this.mutex.lock();
+
+            if (this.closed)
+            {
+                this.mutex.unlock();
+                return false;
+            }
+
+            if (this.sendq[].walkLength > 0)
+            {
+                SudoFiber sf = this.sendq.front;
+                this.sendq.removeFront();
+
+                *msg = sf.msg;
+
+                if (sf.swdg !is null)
+                    sf.swdg();
+
+                this.mutex.unlock();
+
+                if (this.timed_wait)
+                {
+                    this.waitFromBase(sf.msg.create_time, this.timed_wait_period);
+                    this.timed_wait = false;
+                }
+
+                return true;
+            }
+
+            {
+                shared(bool) is_waiting1 = true;
+
+                void stopWait1() {
+                    is_waiting1 = false;
+                }
+
+                SudoFiber new_sf;
+                new_sf.msg_ptr = msg;
+                new_sf.swdg = &stopWait1;
+                new_sf.create_time = MonoTime.currTime;
+
+                this.recvq.insertBack(new_sf);
+                this.mutex.unlock();
+
+                while (is_waiting1)
+                {
+                    if (Fiber.getThis())
+                        Fiber.yield();
+                    Thread.sleep(1.msecs);
+                }
+
+                if (this.timed_wait)
+                {
+                    this.waitFromBase(new_sf.create_time, this.timed_wait_period);
+                    this.timed_wait = false;
+                }
+            }
+
+            return true;
         }
 
         /***********************************************************************
@@ -2134,7 +2199,7 @@ private
             Matches ops against each message in turn until a match is found.
 
             Params:
-                ops = The operations to match.  Each may return a bool to indicate
+                ops = The operations to match. Each may return a bool to indicate
                     whether a message with a matching type is truly a match.
 
             Returns:
@@ -2148,7 +2213,7 @@ private
 
         ***********************************************************************/
 
-        bool get (T...) (scope T vals)
+        public bool get (T...)(scope T vals)
         {
             import std.meta : AliasSeq;
 
@@ -2158,14 +2223,17 @@ private
             {
                 alias Ops = AliasSeq!(T[1 .. $]);
                 alias ops = vals[1 .. $];
-                enum timedWait = true;
-                Duration period = vals[0];
+
+                this.timed_wait = true;
+                this.timed_wait_period = vals[0];
             }
             else
             {
                 alias Ops = AliasSeq!(T);
                 alias ops = vals[0 .. $];
-                enum timedWait = false;
+
+                this.timed_wait = false;
+                this.timed_wait_period = Duration.init;
             }
 
             bool onStandardMsg (ref Message msg)
@@ -2233,143 +2301,78 @@ private
                 }
             }
 
-            bool scan (ref ListT list)
+            bool scan (ref Message msg)
             {
-                for (auto range = list[]; !range.empty;)
+                if (isControlMsg(msg))
                 {
-                    // Only the message handler will throw, so if this occurs
-                    // we can be certain that the message was handled.
-                    scope (failure)
-                        list.removeAt(range);
-
-                    if (isControlMsg(range.front))
+                    if (onControlMsg(msg))
                     {
-                        if (onControlMsg(range.front))
-                        {
-                            // Although the linkDead message is a control message,
-                            // it can be handled by the user.  Since the linkDead
-                            // message throws if not handled, if we get here then
-                            // it has been handled and we can return from receive.
-                            // This is a weird special case that will have to be
-                            // handled in a more general way if more are added.
-                            if (!isLinkDeadMsg(range.front))
-                            {
-                                list.removeAt(range);
-                                continue;
-                            }
-                            list.removeAt(range);
+                        if (!isLinkDeadMsg(msg))
                             return true;
-                        }
-                        range.popFront();
-                        continue;
-                    }
-                    else
-                    {
-                        if (onStandardMsg(range.front))
-                        {
-                            list.removeAt(range);
-                            return true;
-                        }
-                        range.popFront();
-                        continue;
+                        else
+                            return false;
                     }
                 }
-                return false;
-            }
-
-            bool pty (ref ListT list)
-            {
-                if (!list.empty)
+                else
                 {
-                    auto range = list[];
-
-                    if (onStandardMsg(range.front))
-                    {
-                        list.removeAt(range);
+                    if (onStandardMsg(msg))
                         return true;
-                    }
-                    if (range.front.convertsTo!(Throwable))
-                        throw range.front.get!(Throwable);
-                    else if (range.front.convertsTo!(shared(Throwable)))
-                        throw range.front.get!(shared(Throwable));
-                    else
-                        throw new PriorityMessageException(range.front.data);
                 }
                 return false;
             }
 
-            static if (timedWait)
-            {
-                import core.time : MonoTime;
-                auto limit = MonoTime.currTime + period;
-            }
-
+            Message msg;
             while (true)
             {
-                ListT arrived;
-
-                if (pty(m_localPty) || scan(m_localBox))
+                if (this.getMessage(&msg))
                 {
-                    return true;
-                }
-                yield();
-                synchronized (m_lock)
-                {
-                    updateMsgCount();
-                    while (m_sharedPty.empty && m_sharedBox.empty)
-                    {
-                        // NOTE: We're notifying all waiters here instead of just
-                        //       a few because the onCrowding behavior may have
-                        //       changed and we don't want to block sender threads
-                        //       unnecessarily if the new behavior is not to block.
-                        //       This will admittedly result in spurious wakeups
-                        //       in other situations, but what can you do?
-                        if (m_putQueue && !mboxFull())
-                            m_notFull.notifyAll();
-                        static if (timedWait)
-                        {
-                            if (period <= Duration.zero || !m_putMsg.wait(period))
-                                return false;
-                        }
-                        else
-                        {
-                            m_putMsg.wait();
-                        }
-                    }
-                    m_localPty.put(m_sharedPty);
-                    arrived.put(m_sharedBox);
-                }
-                if (m_localPty.empty)
-                {
-                    scope (exit) m_localBox.put(arrived);
-                    if (scan(arrived))
-                    {
-                        return true;
-                    }
+                    if (scan(msg))
+                        break;
                     else
-                    {
-                        static if (timedWait)
-                        {
-                            period = limit - MonoTime.currTime;
-                        }
                         continue;
-                    }
                 }
-                m_localBox.put(arrived);
-                pty(m_localPty);
-                return true;
+                else
+                    break;
+            }
+
+            return false;
+        }
+
+        /***********************************************************************
+
+            When operated by a fiber, wait for a specified period of time
+            from the base time
+
+            Params:
+                base = Base time
+                period = Waiting time
+
+        ***********************************************************************/
+
+        private void waitFromBase (MonoTime base, Duration period)
+        {
+            if (this.timed_wait_period > Duration.zero)
+            {
+                for (auto limit = base + period;
+                    !period.isNegative;
+                    period = limit - MonoTime.currTime)
+                {
+                    if (Fiber.getThis())
+                        Fiber.yield();
+                    Thread.sleep(1.msecs);
+                }
             }
         }
 
         /***********************************************************************
 
-            Called on thread termination.  This routine processes any remaining
+            Called on thread termination. This routine processes any remaining
             control messages, clears out message queues, and sets a flag to
             reject any future messages.
 
         ***********************************************************************/
 
-        final void close ()
+        public void close()
         {
             static void onLinkDeadMsg (ref Message msg)
             {
@@ -2381,48 +2384,43 @@ private
                     thisInfo.owner = Tid.init;
             }
 
-            static void sweep (ref ListT list)
+            SudoFiber sf;
+            bool res;
+
+            this.mutex.lock();
+            scope (exit) this.mutex.unlock();
+
+            this.closed = true;
+
+            while (true)
             {
-                for (auto range = list[]; !range.empty; range.popFront())
-                {
-                    if (range.front.type == MsgType.linkDead)
-                        onLinkDeadMsg(range.front);
-                }
+                if (this.recvq[].walkLength == 0)
+                    break;
+                sf = this.recvq.front;
+                this.recvq.removeFront();
+                if (sf.swdg !is null)
+                    sf.swdg();
             }
 
-            ListT arrived;
-
-            sweep(m_localBox);
-            synchronized (m_lock)
+            while (true)
             {
-                arrived.put(m_sharedBox);
-                m_closed = true;
+                if (this.sendq[].walkLength == 0)
+                    break;
+                sf = this.sendq.front;
+                this.sendq.removeFront();
+                if (sf.msg.type == MsgType.linkDead)
+                    onLinkDeadMsg(sf.msg);
+                if (sf.swdg !is null)
+                    sf.swdg();
             }
-            m_localBox.clear();
-            sweep(arrived);
         }
 
     private:
+
         // Routines involving local data only, no lock needed.
-
-        bool mboxFull () @safe @nogc pure nothrow
-        {
-            return m_maxMsgs && m_maxMsgs <= m_localMsgs + m_sharedBox.length;
-        }
-
-        void updateMsgCount () @safe @nogc pure nothrow
-        {
-            m_localMsgs = m_localBox.length;
-        }
-
         bool isControlMsg (ref Message msg) @safe @nogc pure nothrow
         {
-            return msg.type != MsgType.standard && msg.type != MsgType.priority;
-        }
-
-        bool isPriorityMsg (ref Message msg) @safe @nogc pure nothrow
-        {
-            return msg.type == MsgType.priority;
+            return msg.type != MsgType.standard;
         }
 
         bool isLinkDeadMsg (ref Message msg) @safe @nogc pure nothrow
@@ -2430,254 +2428,52 @@ private
             return msg.type == MsgType.linkDead;
         }
 
-        alias OnMaxFn = bool function(Tid);
-        alias ListT = List!(Message);
+        /// closed
+        bool closed;
 
-        ListT m_localBox;
-        ListT m_localPty;
+        /// lock
+        Mutex mutex;
 
-        Mutex m_lock;
-        Condition m_putMsg;
-        Condition m_notFull;
-        size_t m_putQueue;
-        ListT m_sharedBox;
-        ListT m_sharedPty;
-        OnMaxFn m_onMaxMsgs;
-        size_t m_localMsgs;
-        size_t m_maxMsgs;
-        bool m_closed;
+        /// collection of send waiters
+        DList!SudoFiber sendq;
+
+        /// collection of recv waiters
+        DList!SudoFiber recvq;
+
+        /// timeout
+        Duration timeout;
+
+        /// use delay time in get
+        bool timed_wait;
+
+        /// delay time in get
+        Duration timed_wait_period;
     }
 
-    ///
-    struct List (T)
+    /// Called when restarting a fiber or thread that is waiting in a queue.
+    private alias StopWaitDg = void delegate ();
+
+    /***************************************************************************
+
+        It's a structure that has a fiber accessing a queue, a message,
+        and a delegate that stops waiting.
+
+    ***************************************************************************/
+
+    private struct SudoFiber
     {
-        struct Range
-        {
-            import std.exception : enforce;
+        /// This is a message. Used in put
+        public Message  msg;
 
-            @property bool empty () const
-            {
-                return !m_prev.next;
-            }
+        /// This is a message point. Used in get
+        public Message* msg_ptr;
 
-            @property ref T front ()
-            {
-                enforce(m_prev.next, "invalid list node");
-                return m_prev.next.val;
-            }
+        /// The delegate that stops waiting.
+        public StopWaitDg swdg;
 
-            @property void front (T val)
-            {
-                enforce(m_prev.next, "invalid list node");
-                m_prev.next.val = val;
-            }
-
-            void popFront ()
-            {
-                enforce(m_prev.next, "invalid list node");
-                m_prev = m_prev.next;
-            }
-
-            private this (Node* p)
-            {
-                m_prev = p;
-            }
-
-            private Node* m_prev;
-        }
-
-        void put (T val)
-        {
-            put(newNode(val));
-        }
-
-        void put (ref List!(T) rhs)
-        {
-            if (!rhs.empty)
-            {
-                put(rhs.m_first);
-                while (m_last.next !is null)
-                {
-                    m_last = m_last.next;
-                    m_count++;
-                }
-                rhs.m_first = null;
-                rhs.m_last = null;
-                rhs.m_count = 0;
-            }
-        }
-
-        Range opSlice ()
-        {
-            return Range(cast(Node*)&m_first);
-        }
-
-        void removeAt (Range r)
-        {
-            import std.exception : enforce;
-
-            assert(m_count);
-            Node* n = r.m_prev;
-            enforce(n && n.next, "attempting to remove invalid list node");
-
-            if (m_last is m_first)
-                m_last = null;
-            else if (m_last is n.next)
-                m_last = n; // nocoverage
-            Node* to_free = n.next;
-            n.next = n.next.next;
-            freeNode(to_free);
-            m_count--;
-        }
-
-        @property size_t length ()
-        {
-            return m_count;
-        }
-
-        void clear ()
-        {
-            m_first = m_last = null;
-            m_count = 0;
-        }
-
-        @property bool empty ()
-        {
-            return m_first is null;
-        }
-
-    private:
-        struct Node
-        {
-            Node* next;
-            T val;
-
-            this(T v)
-            {
-                val = v;
-            }
-        }
-
-        static shared struct SpinLock
-        {
-            void lock ()
-            {
-                while (!cas(&locked, false, true))
-                {
-                    Thread.yield();
-                }
-            }
-            void unlock ()
-            {
-                atomicStore!(MemoryOrder.rel)(locked, false);
-            }
-            bool locked;
-        }
-
-        static shared SpinLock sm_lock;
-        static shared Node* sm_head;
-
-        Node* newNode (T v)
-        {
-            Node* n;
-            {
-                sm_lock.lock();
-                scope (exit) sm_lock.unlock();
-
-                if (sm_head)
-                {
-                    n = cast(Node*) sm_head;
-                    sm_head = sm_head.next;
-                }
-            }
-            if (n)
-            {
-                import std.conv : emplace;
-                emplace!Node(n, v);
-            }
-            else
-            {
-                n = new Node(v);
-            }
-            return n;
-        }
-
-        void freeNode (Node* n)
-        {
-            // destroy val to free any owned GC memory
-            destroy(n.val);
-
-            sm_lock.lock();
-            scope (exit) sm_lock.unlock();
-
-            auto sn = cast(shared(Node)*) n;
-            sn.next = sm_head;
-            sm_head = sn;
-        }
-
-        void put (Node* n)
-        {
-            m_count++;
-            if (!empty)
-            {
-                m_last.next = n;
-                m_last = n;
-                return;
-            }
-            m_first = n;
-            m_last = n;
-        }
-
-        Node* m_first;
-        Node* m_last;
-        size_t m_count;
+        /// The creating time
+        public MonoTime create_time;
     }
-}
-
-@system unittest
-{
-    import std.typecons : tuple, Tuple;
-
-    static void testfn (Tid tid)
-    {
-        receive((float val) { assert(0); }, (int val, int val2) {
-            assert(val == 42 && val2 == 86);
-        });
-        receive((Tuple!(int, int) val) { assert(val[0] == 42 && val[1] == 86); });
-        receive((Variant val) {  });
-        receive((string val) {
-            if ("the quick brown fox" != val)
-                return false;
-            return true;
-        }, (string val) { assert(false); });
-        prioritySend(tid, "done");
-    }
-
-    static void runTest (Tid tid)
-    {
-        send(tid, 42, 86);
-        send(tid, tuple(42, 86));
-        send(tid, "hello", "there");
-        send(tid, "the quick brown fox");
-        receive((string val) { assert(val == "done"); });
-    }
-
-    static void simpleTest ()
-    {
-        auto tid = spawn(&testfn, thisTid);
-        runTest(tid);
-
-        // Run the test again with a limited mailbox size.
-        tid = spawn(&testfn, thisTid);
-        setMaxMailboxSize(tid, 2, OnCrowding.block);
-        runTest(tid);
-    }
-
-    simpleTest();
-
-    scheduler = new ThreadScheduler;
-    simpleTest();
-    scheduler = null;
 }
 
 private @property shared(Mutex) initOnceLock ()
@@ -2817,6 +2613,7 @@ auto ref initOnce (alias var) (lazy typeof(var) init, Mutex mutex)
         initOnce!varB(true, m);
         ownerTid.send(true);
     });
+
     // init depends on the result of the spawned thread
     initOnce!varA(receiveOnly!bool);
     assert(varA == true);
