@@ -1258,7 +1258,7 @@ class FiberScheduler : Scheduler
      */
     Condition newCondition(Mutex m) nothrow
     {
-        return new FiberCondition(m);
+        return new FiberCondition();
     }
 
 protected:
@@ -1289,23 +1289,17 @@ protected:
     {
         ThreadInfo info;
 
-        this(void delegate() op) nothrow
-        {
-            super(op);
-        }
-
-        this(void delegate() op, size_t sz) nothrow
+        this(void delegate() op, size_t sz = 16 * 1024 * 1024) nothrow
         {
             super(op, sz);
         }
     }
 
-private:
-    class FiberCondition : Condition
+    protected class FiberCondition : Condition
     {
-        this(Mutex m) nothrow
+        this() nothrow
         {
-            super(m);
+            super(null);
             notified = false;
         }
 
@@ -1314,7 +1308,7 @@ private:
             scope (exit) notified = false;
 
             while (!notified)
-                switchContext();
+                this.outer.yield();
         }
 
         override bool wait(Duration period) nothrow
@@ -1335,22 +1329,12 @@ private:
         override void notify() nothrow
         {
             notified = true;
-            switchContext();
+            this.outer.yield();
         }
 
         override void notifyAll() nothrow
         {
             notified = true;
-            switchContext();
-        }
-
-    private:
-        void switchContext() nothrow
-        {
-            if (mutex_nothrow) mutex_nothrow.unlock_nothrow();
-            scope (exit)
-                if (mutex_nothrow)
-                    mutex_nothrow.lock_nothrow();
             this.outer.yield();
         }
 
@@ -1384,49 +1368,6 @@ private:
 private:
     Fiber[] m_fibers;
     size_t m_pos;
-}
-
-@system unittest
-{
-    static void receive(Condition cond, ref size_t received)
-    {
-        while (true)
-        {
-            synchronized (cond.mutex)
-            {
-                cond.wait();
-                ++received;
-            }
-        }
-    }
-
-    static void send(Condition cond, ref size_t sent)
-    {
-        while (true)
-        {
-            synchronized (cond.mutex)
-            {
-                ++sent;
-                cond.notify();
-            }
-        }
-    }
-
-    auto fs = new FiberScheduler;
-    auto mtx = new Mutex;
-    auto cond = fs.newCondition(mtx);
-
-    size_t received, sent;
-    auto waiter = new Fiber({ receive(cond, received); }), notifier = new Fiber({ send(cond, sent); });
-    waiter.call();
-    assert(received == 0);
-    notifier.call();
-    assert(sent == 1);
-    assert(received == 0);
-    waiter.call();
-    assert(received == 1);
-    waiter.call();
-    assert(received == 1);
 }
 
 /**
