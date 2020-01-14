@@ -1370,14 +1370,7 @@ private:
     size_t m_pos;
 }
 
-/**
- * Sets the Scheduler behavior within the program.
- *
- * This variable sets the Scheduler behavior within this program.  Typically,
- * when setting a Scheduler, scheduler.start() should be called in main.  This
- * routine will not return until program execution is complete.
- */
-__gshared Scheduler scheduler;
+private __gshared Scheduler scheduler;
 
 /**
  * This function will call scheduler.yield() or Fiber.yield(), as appropriate.
