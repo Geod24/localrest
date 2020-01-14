@@ -601,7 +601,7 @@ if (isSpawnable!(F, T))
 void send(T...)(Tid tid, T vals)
 {
     static assert(!hasLocalAliasing!(T), "Aliases to mutable thread-local data not allowed.");
-    _send(tid, vals);
+    _send(MsgType.standard, tid, vals);
 }
 
 /**
@@ -615,14 +615,6 @@ void prioritySend(T...)(Tid tid, T vals)
 {
     static assert(!hasLocalAliasing!(T), "Aliases to mutable thread-local data not allowed.");
     _send(MsgType.priority, tid, vals);
-}
-
-/*
- * ditto
- */
-private void _send(T...)(Tid tid, T vals)
-{
-    _send(MsgType.standard, tid, vals);
 }
 
 /*
