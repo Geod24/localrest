@@ -981,109 +981,6 @@ struct ThreadInfo
 }
 
 /**
- * A Scheduler controls how threading is performed by spawn.
- *
- * Implementing a Scheduler allows the concurrency mechanism used by this
- * module to be customized according to different needs.  By default, a call
- * to spawn will create a new kernel thread that executes the supplied routine
- * and terminates when finished.  But it is possible to create Schedulers that
- * reuse threads, that multiplex Fibers (coroutines) across a single thread,
- * or any number of other approaches.  By making the choice of Scheduler a
- * user-level option, std.concurrency may be used for far more types of
- * application than if this behavior were predefined.
- *
- * Example:
- * ---
- * import std.concurrency;
- * import std.stdio;
- *
- * void main()
- * {
- *     scheduler = new FiberScheduler;
- *     scheduler.start(
- *     {
- *         writeln("the rest of main goes here");
- *     });
- * }
- * ---
- *
- * Some schedulers have a dispatching loop that must run if they are to work
- * properly, so for the sake of consistency, when using a scheduler, start()
- * must be called within main().  This yields control to the scheduler and
- * will ensure that any spawned threads are executed in an expected manner.
- */
-interface Scheduler
-{
-    /**
-     * Spawns the supplied op and starts the Scheduler.
-     *
-     * This is intended to be called at the start of the program to yield all
-     * scheduling to the active Scheduler instance.  This is necessary for
-     * schedulers that explicitly dispatch threads rather than simply relying
-     * on the operating system to do so, and so start should always be called
-     * within main() to begin normal program execution.
-     *
-     * Params:
-     *  op = A wrapper for whatever the main thread would have done in the
-     *       absence of a custom scheduler.  It will be automatically executed
-     *       via a call to spawn by the Scheduler.
-     */
-    void start(void delegate() op);
-
-    /**
-     * Assigns a logical thread to execute the supplied op.
-     *
-     * This routine is called by spawn.  It is expected to instantiate a new
-     * logical thread and run the supplied operation.  This thread must call
-     * thisInfo.cleanup() when the thread terminates if the scheduled thread
-     * is not a kernel thread--all kernel threads will have their ThreadInfo
-     * cleaned up automatically by a thread-local destructor.
-     *
-     * Params:
-     *  op = The function to execute.  This may be the actual function passed
-     *       by the user to spawn itself, or may be a wrapper function.
-     */
-    void spawn(void delegate() op);
-
-    /**
-     * Yields execution to another logical thread.
-     *
-     * This routine is called at various points within concurrency-aware APIs
-     * to provide a scheduler a chance to yield execution when using some sort
-     * of cooperative multithreading model.  If this is not appropriate, such
-     * as when each logical thread is backed by a dedicated kernel thread,
-     * this routine may be a no-op.
-     */
-    void yield() nothrow;
-
-    /**
-     * Returns an appropriate ThreadInfo instance.
-     *
-     * Returns an instance of ThreadInfo specific to the logical thread that
-     * is calling this routine or, if the calling thread was not create by
-     * this scheduler, returns ThreadInfo.thisInfo instead.
-     */
-    @property ref ThreadInfo thisInfo() nothrow;
-
-    /**
-     * Creates a Condition variable analog for signaling.
-     *
-     * Creates a new Condition variable analog which is used to check for and
-     * to signal the addition of messages to a thread's message queue.  Like
-     * yield, some schedulers may need to define custom behavior so that calls
-     * to Condition.wait() yield to another thread when no new messages are
-     * available instead of blocking.
-     *
-     * Params:
-     *  m = The Mutex that will be associated with this condition.  It will be
-     *      locked prior to any operation on the condition, and so in some
-     *      cases a Scheduler may need to hold this reference and unlock the
-     *      mutex before yielding execution to another logical thread.
-     */
-    Condition newCondition(Mutex m) nothrow;
-}
-
-/**
  * An example Scheduler using kernel threads.
  *
  * This is an example Scheduler that mirrors the default scheduling behavior
@@ -1091,7 +988,7 @@ interface Scheduler
  * and may be instantiated and used, but is not a necessary part of the
  * default functioning of this module.
  */
-class ThreadScheduler : Scheduler
+class ThreadScheduler
 {
     /**
      * This simply runs op directly, since no real scheduling is needed by
@@ -1109,14 +1006,6 @@ class ThreadScheduler : Scheduler
     {
         auto t = new Thread(op);
         t.start();
-    }
-
-    /**
-     * This scheduler does no explicit multiplexing, so this is a no-op.
-     */
-    void yield() nothrow
-    {
-        // no explicit yield needed
     }
 
     /**
@@ -1143,7 +1032,7 @@ class ThreadScheduler : Scheduler
  * This is an example scheduler that creates a new Fiber per call to spawn
  * and multiplexes the execution of all fibers within the main thread.
  */
-class FiberScheduler : Scheduler
+class FiberScheduler
 {
     /**
      * This creates a new Fiber for the supplied op and then starts the
@@ -1162,14 +1051,14 @@ class FiberScheduler : Scheduler
     void spawn(void delegate() op) nothrow
     {
         create(op);
-        yield();
+        FiberScheduler.yield();
     }
 
     /**
      * If the caller is a scheduled Fiber, this yields execution to another
      * scheduled Fiber.
      */
-    void yield() nothrow
+    static void yield() nothrow
     {
         // NOTE: It's possible that we should test whether the calling Fiber
         //       is an InfoFiber before yielding, but I think it's reasonable
@@ -1258,7 +1147,7 @@ protected:
             scope (exit) notified = false;
 
             while (!notified)
-                this.outer.yield();
+                FiberScheduler.yield();
         }
 
         override bool wait(Duration period) nothrow
@@ -1271,7 +1160,7 @@ protected:
                  !notified && !period.isNegative;
                  period = limit - MonoTime.currTime)
             {
-                this.outer.yield();
+                FiberScheduler.yield();
             }
             return notified;
         }
@@ -1279,13 +1168,13 @@ protected:
         override void notify() nothrow
         {
             notified = true;
-            this.outer.yield();
+            FiberScheduler.yield();
         }
 
         override void notifyAll() nothrow
         {
             notified = true;
-            this.outer.yield();
+            FiberScheduler.yield();
         }
 
         private bool notified;
@@ -1320,19 +1209,8 @@ private:
     size_t m_pos;
 }
 
-private __gshared Scheduler scheduler;
+private __gshared ThreadScheduler scheduler;
 
-/**
- * This function will call scheduler.yield() or Fiber.yield(), as appropriate.
- */
-void yield() nothrow
-{
-
-    if (scheduler)
-        scheduler.yield();
-    else if (auto fiber = Fiber.getThis())
-        return Fiber.yield();
-}
 
 package
 {
@@ -1606,7 +1484,7 @@ package
                 {
                     return true;
                 }
-                yield();
+                FiberScheduler.yield();
                 synchronized (m_lock)
                 {
                     updateMsgCount();
