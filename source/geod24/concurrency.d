@@ -466,7 +466,7 @@ Tid spawn(F, T...)(F fn, T args)
 if (isSpawnable!(F, T))
 {
     static assert(!hasLocalAliasing!(T), "Aliases to mutable thread-local data not allowed.");
-    return _spawn(false, fn, args);
+    return _spawn(fn, args);
 }
 
 ///
@@ -518,36 +518,10 @@ if (isSpawnable!(F, T))
     assert(receivedMessage == "Hello World");
 }
 
-/**
- * Starts fn(args) in a logical thread and will receive a LinkTerminated
- * message when the operation terminates.
- *
- * Executes the supplied function in a new logical thread represented by
- * Tid.  This new thread is linked to the calling thread so that if either
- * it or the calling thread terminates a LinkTerminated message will be sent
- * to the other, causing a LinkTerminated exception to be thrown on receive().
- * The owner relationship from spawn() is preserved as well, so if the link
- * between threads is broken, owner termination will still result in an
- * OwnerTerminated exception to be thrown on receive().
- *
- * Params:
- *  fn   = The function to execute.
- *  args = Arguments to the function.
- *
- * Returns:
- *  A Tid representing the new thread.
- */
-Tid spawnLinked(F, T...)(F fn, T args)
-if (isSpawnable!(F, T))
-{
-    static assert(!hasLocalAliasing!(T), "Aliases to mutable thread-local data not allowed.");
-    return _spawn(true, fn, args);
-}
-
 /*
  *
  */
-private Tid _spawn(F, T...)(bool linked, F fn, T args)
+private Tid _spawn(F, T...)(F fn, T args)
 if (isSpawnable!(F, T))
 {
     // TODO: MessageList and &exec should be shared.
@@ -569,7 +543,6 @@ if (isSpawnable!(F, T))
         auto t = new Thread(&exec);
         t.start();
     }
-    thisInfo.links[spawnTid] = linked;
     return spawnTid;
 }
 
@@ -996,7 +969,6 @@ void setMaxMailboxSize(Tid tid, size_t messages, bool function(Tid) onCrowdingDo
 struct ThreadInfo
 {
     Tid ident;
-    bool[Tid] links;
     Tid owner;
 
     /**
@@ -1023,8 +995,6 @@ struct ThreadInfo
     {
         if (ident.mbox !is null)
             ident.mbox.close();
-        foreach (tid; links.keys)
-            _send(MsgType.linkDead, tid, ident);
         if (owner != Tid.init)
             _send(MsgType.linkDead, owner, ident);
     }
@@ -1554,20 +1524,6 @@ package
                         "Message could be converted to Tid");
                 auto tid = msg.get!(Tid);
 
-                if (bool* pDepends = tid in thisInfo.links)
-                {
-                    auto depends = *pDepends;
-                    thisInfo.links.remove(tid);
-                    // Give the owner relationship precedence.
-                    if (depends && tid != thisInfo.owner)
-                    {
-                        auto e = new LinkTerminated(tid);
-                        auto m = Message(MsgType.standard, e);
-                        if (onStandardMsg(m))
-                            return true;
-                        throw e;
-                    }
-                }
                 if (tid == thisInfo.owner)
                 {
                     thisInfo.owner = Tid.init;
@@ -1732,7 +1688,6 @@ package
                         "Message could be converted to Tid");
                 auto tid = msg.get!(Tid);
 
-                thisInfo.links.remove(tid);
                 if (tid == thisInfo.owner)
                     thisInfo.owner = Tid.init;
             }
