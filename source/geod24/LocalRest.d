@@ -406,7 +406,7 @@ public final class RemoteAPI (API) : API
 
     ***************************************************************************/
 
-    private static void spawned (Implementation) (CtorParams!Implementation cargs)
+    private static void spawned (Implementation) (C.Tid self, CtorParams!Implementation cargs)
     {
         import std.datetime.systime : Clock, SysTime;
         import std.algorithm : each;
@@ -876,7 +876,7 @@ unittest
     auto node1 = factory("normal", 1);
     auto node2 = factory("byzantine", 2);
 
-    static void testFunc(geod24.concurrency.Tid parent)
+    static void testFunc(geod24.concurrency.Tid self, geod24.concurrency.Tid parent)
     {
         auto node1 = factory("this does not matter", 1);
         auto node2 = factory("neither does this", 2);

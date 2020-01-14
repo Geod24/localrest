@@ -50,7 +50,7 @@ import std.traits;
 @system unittest
 {
     __gshared string received;
-    static void spawnedFunc(Tid ownerTid)
+    static void spawnedFunc(Tid self, Tid ownerTid)
     {
         import std.conv : text;
         // Receive a message from the owner thread.
@@ -402,7 +402,7 @@ public:
 {
     import std.exception : assertThrown;
 
-    static void fun()
+    static void fun(Tid self)
     {
         string res = receiveOnly!string();
         assert(res == "Main calling");
@@ -436,7 +436,7 @@ private template isSpawnable(F, T...)
     }
 
     enum isSpawnable = isCallable!F && is(ReturnType!F == void)
-            && isParamsImplicitlyConvertible!(F, void function(T))
+            && isParamsImplicitlyConvertible!(F, void function(Tid, T))
             && (isFunctionPointer!F || !hasUnsharedAliasing!F);
 }
 
@@ -472,7 +472,7 @@ if (isSpawnable!(F, T))
 ///
 @system unittest
 {
-    static void f(string msg)
+    static void f(Tid self, string msg)
     {
         assert(msg == "Hello World");
     }
@@ -485,11 +485,11 @@ if (isSpawnable!(F, T))
 {
     string msg = "Hello, World!";
 
-    static void f1(string msg) {}
+    static void f1(Tid self, string msg) {}
     static assert(!__traits(compiles, spawn(&f1, msg.dup)));
     static assert( __traits(compiles, spawn(&f1, msg.idup)));
 
-    static void f2(char[] msg) {}
+    static void f2(Tid self, char[] msg) {}
     static assert(!__traits(compiles, spawn(&f2, msg.dup)));
     static assert(!__traits(compiles, spawn(&f2, msg.idup)));
 }
@@ -497,7 +497,7 @@ if (isSpawnable!(F, T))
 /// New thread with anonymous function
 @system unittest
 {
-    spawn({
+    spawn((Tid self) {
         ownerTid.send("This is so great!");
     });
     assert(receiveOnly!string == "This is so great!");
@@ -508,7 +508,7 @@ if (isSpawnable!(F, T))
     import core.thread : thread_joinAll;
 
     __gshared string receivedMessage;
-    static void f1(string msg)
+    static void f1(Tid self, string msg)
     {
         receivedMessage = msg;
     }
@@ -532,7 +532,7 @@ if (isSpawnable!(F, T))
     {
         thisInfo.ident = spawnTid;
         thisInfo.owner = ownerTid;
-        fn(args);
+        fn(spawnTid, args);
     }
 
     // TODO: MessageList and &exec should be shared.
@@ -548,19 +548,19 @@ if (isSpawnable!(F, T))
 
 @system unittest
 {
-    void function() fn1;
-    void function(int) fn2;
+    void function(Tid) fn1;
+    void function(Tid, int) fn2;
     static assert(__traits(compiles, spawn(fn1)));
     static assert(__traits(compiles, spawn(fn2, 2)));
     static assert(!__traits(compiles, spawn(fn1, 1)));
     static assert(!__traits(compiles, spawn(fn2)));
 
-    void delegate(int) shared dg1;
-    shared(void delegate(int)) dg2;
-    shared(void delegate(long) shared) dg3;
-    shared(void delegate(real, int, long) shared) dg4;
-    void delegate(int) immutable dg5;
-    void delegate(int) dg6;
+    void delegate(Tid, int) shared dg1;
+    shared(void delegate(Tid, int)) dg2;
+    shared(void delegate(Tid, long) shared) dg3;
+    shared(void delegate(Tid, real, int, long) shared) dg4;
+    void delegate(Tid, int) immutable dg5;
+    void delegate(Tid, int) dg6;
     static assert(__traits(compiles, spawn(dg1, 1)));
     static assert(__traits(compiles, spawn(dg2, 2)));
     static assert(__traits(compiles, spawn(dg3, 3)));
@@ -568,17 +568,17 @@ if (isSpawnable!(F, T))
     static assert(__traits(compiles, spawn(dg5, 5)));
     static assert(!__traits(compiles, spawn(dg6, 6)));
 
-    auto callable1  = new class{ void opCall(int) shared {} };
-    auto callable2  = cast(shared) new class{ void opCall(int) shared {} };
-    auto callable3  = new class{ void opCall(int) immutable {} };
-    auto callable4  = cast(immutable) new class{ void opCall(int) immutable {} };
-    auto callable5  = new class{ void opCall(int) {} };
-    auto callable6  = cast(shared) new class{ void opCall(int) immutable {} };
-    auto callable7  = cast(immutable) new class{ void opCall(int) shared {} };
-    auto callable8  = cast(shared) new class{ void opCall(int) const shared {} };
-    auto callable9  = cast(const shared) new class{ void opCall(int) shared {} };
-    auto callable10 = cast(const shared) new class{ void opCall(int) const shared {} };
-    auto callable11 = cast(immutable) new class{ void opCall(int) const shared {} };
+    auto callable1  = new class{ void opCall(Tid, int) shared {} };
+    auto callable2  = cast(shared) new class{ void opCall(Tid, int) shared {} };
+    auto callable3  = new class{ void opCall(Tid, int) immutable {} };
+    auto callable4  = cast(immutable) new class{ void opCall(Tid, int) immutable {} };
+    auto callable5  = new class{ void opCall(Tid, int) {} };
+    auto callable6  = cast(shared) new class{ void opCall(Tid, int) immutable {} };
+    auto callable7  = cast(immutable) new class{ void opCall(Tid, int) shared {} };
+    auto callable8  = cast(shared) new class{ void opCall(Tid, int) const shared {} };
+    auto callable9  = cast(const shared) new class{ void opCall(Tid, int) shared {} };
+    auto callable10 = cast(const shared) new class{ void opCall(Tid, int) const shared {} };
+    auto callable11 = cast(immutable) new class{ void opCall(Tid, int) const shared {} };
     static assert(!__traits(compiles, spawn(callable1,  1)));
     static assert( __traits(compiles, spawn(callable2,  2)));
     static assert(!__traits(compiles, spawn(callable3,  3)));
@@ -659,7 +659,7 @@ do
 {
     import std.variant : Variant;
 
-    auto process = ()
+    auto process = (Tid self)
     {
         receive(
             (int i) { ownerTid.send(1); },
@@ -781,7 +781,7 @@ do
 @system unittest
 {
     auto tid = spawn(
-    {
+    (Tid self) {
         assert(receiveOnly!int == 42);
     });
     send(tid, 42);
@@ -791,7 +791,7 @@ do
 @system unittest
 {
     auto tid = spawn(
-    {
+    (Tid self) {
         assert(receiveOnly!string == "text");
     });
     send(tid, "text");
@@ -803,7 +803,7 @@ do
     struct Record { string name; int age; }
 
     auto tid = spawn(
-    {
+    (Tid self) {
         auto msg = receiveOnly!(double, Record);
         assert(msg[0] == 0.5);
         assert(msg[1].name == "Alice");
@@ -815,7 +815,7 @@ do
 
 @system unittest
 {
-    static void t1(Tid mainTid)
+    static void t1(Tid self, Tid mainTid)
     {
         try
         {
@@ -1934,7 +1934,7 @@ package
 {
     import std.typecons : tuple, Tuple;
 
-    static void testfn(Tid tid)
+    static void testfn(Tid self, Tid tid)
     {
         receive((float val) { assert(0); }, (int val, int val2) {
             assert(val == 42 && val2 == 86);
@@ -1980,7 +1980,7 @@ package
 @system unittest
 {
     static shared int[] x = new shared(int)[1];
-    auto tid = spawn({
+    auto tid = spawn((Tid self) {
         auto arr = receiveOnly!(shared(int)[]);
         arr[0] = 5;
         ownerTid.send(true);
