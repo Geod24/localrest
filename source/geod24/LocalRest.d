@@ -471,7 +471,7 @@ public final class RemoteAPI (API) : API
                 bool terminated = false;
                 while (!terminated)
                 {
-                    C.receiveTimeout(10.msecs,
+                    C.receiveTimeout(C.thisTid(), 10.msecs,
                         (C.OwnerTerminated e) { terminated = true; },
                         (ShutdownCommand e) {
                             terminated = true;
@@ -745,7 +745,7 @@ public final class RemoteAPI (API) : API
                             runTask(() {
                                 while (!terminated)
                                 {
-                                    C.receiveTimeout(10.msecs,
+                                    C.receiveTimeout(C.thisTid(), 10.msecs,
                                         (Response res) {
                                             scheduler.pending = res;
                                             scheduler.waiting[res.id].c.notify();
@@ -895,9 +895,10 @@ unittest
         geod24.concurrency.send(parent, 42);
     }
 
-    auto testerFiber = geod24.concurrency.spawn(&testFunc, geod24.concurrency.thisTid);
+    auto self = geod24.concurrency.thisTid();
+    auto testerFiber = geod24.concurrency.spawn(&testFunc, self);
     // Make sure our main thread terminates after everyone else
-    geod24.concurrency.receiveOnly!int();
+    geod24.concurrency.receiveOnly!int(self);
 }
 
 /// This network have different types of nodes in it

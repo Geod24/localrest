@@ -54,7 +54,7 @@ import std.traits;
     {
         import std.conv : text;
         // Receive a message from the owner thread.
-        receive((int i){
+        self.receive((int i){
             received = text("Received the number ", i);
 
             // Send a message back to the owner thread
@@ -65,12 +65,13 @@ import std.traits;
 
     // Start spawnedFunc in a new thread.
     auto childTid = spawn(&spawnedFunc, thisTid);
+    auto self = thisTid();
 
     // Send the number 42 to this new thread.
     send(childTid, 42);
 
     // Receive the result code.
-    auto wasSuccessful = receiveOnly!(bool);
+    auto wasSuccessful = self.receiveOnly!(bool);
     assert(wasSuccessful);
     assert(received == "Received the number 42");
 }
@@ -404,15 +405,16 @@ public:
 
     static void fun(Tid self)
     {
-        string res = receiveOnly!string();
+        string res = self.receiveOnly!string();
         assert(res == "Main calling");
         ownerTid.send("Child responding");
     }
 
     assertThrown!TidMissingException(ownerTid);
+    auto self = thisTid();
     auto child = spawn(&fun);
     child.send("Main calling");
-    string res = receiveOnly!string();
+    string res = self.receiveOnly!string();
     assert(res == "Child responding");
 }
 
@@ -497,10 +499,11 @@ if (isSpawnable!(F, T))
 /// New thread with anonymous function
 @system unittest
 {
+    auto self = thisTid();
     spawn((Tid self) {
         ownerTid.send("This is so great!");
     });
-    assert(receiveOnly!string == "This is so great!");
+    assert(self.receiveOnly!string == "This is so great!");
 }
 
 @system unittest
@@ -640,18 +643,17 @@ private void _send(T...)(MsgType type, Tid tid, T vals)
  * the `Variant` will contain a $(REF Tuple, std,typecons) of all values
  * sent.
  */
-void receive(T...)( T ops )
+void receive(T...)(Tid self, T ops )
 in
 {
-    assert(thisInfo.ident.mbox !is null,
+    assert(self.mbox !is null,
            "Cannot receive a message until a thread was spawned "
            ~ "or thisTid was passed to a running thread.");
 }
 do
 {
     checkops( ops );
-
-    thisInfo.ident.mbox.get( ops );
+    self.mbox.get( ops );
 }
 
 ///
@@ -661,29 +663,30 @@ do
 
     auto process = (Tid self)
     {
-        receive(
+        self.receive(
             (int i) { ownerTid.send(1); },
             (double f) { ownerTid.send(2); },
             (Variant v) { ownerTid.send(3); }
         );
     };
 
+    auto self = thisTid();
     {
         auto tid = spawn(process);
         send(tid, 42);
-        assert(receiveOnly!int == 1);
+        assert(self.receiveOnly!int == 1);
     }
 
     {
         auto tid = spawn(process);
         send(tid, 3.14);
-        assert(receiveOnly!int == 2);
+        assert(self.receiveOnly!int == 2);
     }
 
     {
         auto tid = spawn(process);
         send(tid, "something else");
-        assert(receiveOnly!int == 3);
+        assert(self.receiveOnly!int == 3);
     }
 }
 
@@ -691,18 +694,18 @@ do
 {
     static assert( __traits( compiles,
                       {
-                          receive( (Variant x) {} );
-                          receive( (int x) {}, (Variant x) {} );
+                          receive(Tid.init, (Variant x) {} );
+                          receive(Tid.init, (int x) {}, (Variant x) {} );
                       } ) );
 
     static assert( !__traits( compiles,
                        {
-                           receive( (Variant x) {}, (int x) {} );
+                           receive(Tid.init, (Variant x) {}, (int x) {} );
                        } ) );
 
     static assert( !__traits( compiles,
                        {
-                           receive( (int x) {}, (int x) {} );
+                           receive(Tid.init, (int x) {}, (int x) {} );
                        } ) );
 }
 
@@ -715,8 +718,8 @@ version (unittest)
 {
     static assert( __traits( compiles,
                       {
-                          receive( &receiveFunction );
-                          receive( &receiveFunction, (Variant x) {} );
+                          receive(Tid.init, &receiveFunction );
+                          receive(Tid.init, &receiveFunction, (Variant x) {} );
                       } ) );
 }
 
@@ -743,10 +746,10 @@ private template receiveOnlyRet(T...)
  * Returns: The received message.  If `T.length` is greater than one,
  *          the message will be packed into a $(REF Tuple, std,typecons).
  */
-receiveOnlyRet!(T) receiveOnly(T...)()
+receiveOnlyRet!(T) receiveOnly(T...)(Tid self)
 in
 {
-    assert(thisInfo.ident.mbox !is null,
+    assert(self.mbox !is null,
         "Cannot receive a message until a thread was spawned or thisTid was passed to a running thread.");
 }
 do
@@ -756,7 +759,7 @@ do
 
     Tuple!(T) ret;
 
-    thisInfo.ident.mbox.get((T val) {
+    self.mbox.get((T val) {
         static if (T.length)
             ret.field = val;
     },
@@ -782,7 +785,7 @@ do
 {
     auto tid = spawn(
     (Tid self) {
-        assert(receiveOnly!int == 42);
+        assert(self.receiveOnly!int == 42);
     });
     send(tid, 42);
 }
@@ -792,7 +795,7 @@ do
 {
     auto tid = spawn(
     (Tid self) {
-        assert(receiveOnly!string == "text");
+        assert(self.receiveOnly!string == "text");
     });
     send(tid, "text");
 }
@@ -804,7 +807,7 @@ do
 
     auto tid = spawn(
     (Tid self) {
-        auto msg = receiveOnly!(double, Record);
+        auto msg = self.receiveOnly!(double, Record);
         assert(msg[0] == 0.5);
         assert(msg[1].name == "Alice");
         assert(msg[1].age == 31);
@@ -819,7 +822,7 @@ do
     {
         try
         {
-            receiveOnly!string();
+            self.receiveOnly!string();
             mainTid.send("");
         }
         catch (Throwable th)
@@ -828,9 +831,10 @@ do
         }
     }
 
-    auto tid = spawn(&t1, thisTid);
+    auto self = thisTid();
+    auto tid = spawn(&t1, self);
     tid.send(1);
-    string result = receiveOnly!string();
+    string result = self.receiveOnly!string();
     assert(result == "Unexpected message type: expected 'string', got 'int'");
 }
 
@@ -843,36 +847,35 @@ do
  * $(REF Duration, core,time) has passed. It returns `true` if it received a
  * message and `false` if it timed out waiting for one.
  */
-bool receiveTimeout(T...)(Duration duration, T ops)
+bool receiveTimeout(T...)(Tid self, Duration duration, T ops)
 in
 {
-    assert(thisInfo.ident.mbox !is null,
+    assert(self.mbox !is null,
         "Cannot receive a message until a thread was spawned or thisTid was passed to a running thread.");
 }
 do
 {
     checkops(ops);
-
-    return thisInfo.ident.mbox.get(duration, ops);
+    return self.mbox.get(duration, ops);
 }
 
 @safe unittest
 {
     static assert(__traits(compiles, {
-        receiveTimeout(msecs(0), (Variant x) {});
-        receiveTimeout(msecs(0), (int x) {}, (Variant x) {});
+        receiveTimeout(Tid.init, msecs(0), (Variant x) {});
+        receiveTimeout(Tid.init, msecs(0), (int x) {}, (Variant x) {});
     }));
 
     static assert(!__traits(compiles, {
-        receiveTimeout(msecs(0), (Variant x) {}, (int x) {});
+        receiveTimeout(Tid.init, msecs(0), (Variant x) {}, (int x) {});
     }));
 
     static assert(!__traits(compiles, {
-        receiveTimeout(msecs(0), (int x) {}, (int x) {});
+        receiveTimeout(Tid.init, msecs(0), (int x) {}, (int x) {});
     }));
 
     static assert(__traits(compiles, {
-        receiveTimeout(msecs(10), (int x) {}, (Variant x) {});
+        receiveTimeout(Tid.init, msecs(10), (int x) {}, (Variant x) {});
     }));
 }
 
@@ -1936,12 +1939,12 @@ package
 
     static void testfn(Tid self, Tid tid)
     {
-        receive((float val) { assert(0); }, (int val, int val2) {
+        self.receive((float val) { assert(0); }, (int val, int val2) {
             assert(val == 42 && val2 == 86);
         });
-        receive((Tuple!(int, int) val) { assert(val[0] == 42 && val[1] == 86); });
-        receive((Variant val) {  });
-        receive((string val) {
+        self.receive((Tuple!(int, int) val) { assert(val[0] == 42 && val[1] == 86); });
+        self.receive((Variant val) {  });
+        self.receive((string val) {
             if ("the quick brown fox" != val)
                 return false;
             return true;
@@ -1949,30 +1952,30 @@ package
         prioritySend(tid, "done");
     }
 
-    static void runTest(Tid tid)
+    static void runTest(Tid self, Tid tid)
     {
         send(tid, 42, 86);
         send(tid, tuple(42, 86));
         send(tid, "hello", "there");
         send(tid, "the quick brown fox");
-        receive((string val) { assert(val == "done"); });
+        self.receive((string val) { assert(val == "done"); });
     }
 
-    static void simpleTest()
+    static void simpleTest(Tid self)
     {
-        auto tid = spawn(&testfn, thisTid);
-        runTest(tid);
+        auto tid = spawn(&testfn, self);
+        runTest(self, tid);
 
         // Run the test again with a limited mailbox size.
-        tid = spawn(&testfn, thisTid);
+        tid = spawn(&testfn, self);
         setMaxMailboxSize(tid, 2, OnCrowding.block);
-        runTest(tid);
+        runTest(self, tid);
     }
 
-    simpleTest();
+    simpleTest(thisTid());
 
     scheduler = new ThreadScheduler;
-    simpleTest();
+    simpleTest(thisTid());
     scheduler = null;
 }
 
@@ -1981,11 +1984,12 @@ package
 {
     static shared int[] x = new shared(int)[1];
     auto tid = spawn((Tid self) {
-        auto arr = receiveOnly!(shared(int)[]);
+        auto arr = self.receiveOnly!(shared(int)[]);
         arr[0] = 5;
         ownerTid.send(true);
     });
     tid.send(x);
-    receiveOnly!(bool);
+    auto self = thisTid();
+    self.receiveOnly!(bool);
     assert(x[0] == 5);
 }
