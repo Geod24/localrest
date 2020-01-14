@@ -506,21 +506,6 @@ if (isSpawnable!(F, T))
     assert(self.receiveOnly!string == "This is so great!");
 }
 
-@system unittest
-{
-    import core.thread : thread_joinAll;
-
-    __gshared string receivedMessage;
-    static void f1(Tid self, string msg)
-    {
-        receivedMessage = msg;
-    }
-
-    auto tid1 = spawn(&f1, "Hello World");
-    thread_joinAll;
-    assert(receivedMessage == "Hello World");
-}
-
 /*
  *
  */
