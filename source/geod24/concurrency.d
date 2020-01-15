@@ -218,9 +218,7 @@ private
 
     @property ref ThreadInfo thisInfo() nothrow
     {
-        if (scheduler is null)
-            return ThreadInfo.thisInfo;
-        return scheduler.thisInfo;
+        return ThreadInfo.thisInfo;
     }
 }
 
@@ -524,13 +522,8 @@ if (isSpawnable!(F, T))
     }
 
     // TODO: MessageList and &exec should be shared.
-    if (scheduler !is null)
-        scheduler.spawn(&exec);
-    else
-    {
-        auto t = new Thread(&exec);
-        t.start();
-    }
+    auto t = new Thread(&exec);
+    t.start();
     return spawnTid;
 }
 
@@ -1209,9 +1202,6 @@ private:
     size_t m_pos;
 }
 
-private __gshared ThreadScheduler scheduler;
-
-
 package
 {
     /*
@@ -1228,16 +1218,8 @@ package
             m_lock = new Mutex;
             m_closed = false;
 
-            if (scheduler is null)
-            {
-                m_putMsg = new Condition(m_lock);
-                m_notFull = new Condition(m_lock);
-            }
-            else
-            {
-                m_putMsg = scheduler.newCondition(m_lock);
-                m_notFull = scheduler.newCondition(m_lock);
-            }
+            m_putMsg = new Condition(m_lock);
+            m_notFull = new Condition(m_lock);
         }
 
         ///
@@ -1836,10 +1818,6 @@ package
     }
 
     simpleTest(thisTid());
-
-    scheduler = new ThreadScheduler;
-    simpleTest(thisTid());
-    scheduler = null;
 }
 
 // test ability to send shared arrays
