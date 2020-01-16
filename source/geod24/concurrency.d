@@ -294,22 +294,6 @@ class PriorityMessageException : Exception
 }
 
 /**
- * Thrown on mailbox crowding if the mailbox is configured with
- * `OnCrowding.throwException`.
- */
-class MailboxFull : Exception
-{
-    ///
-    this(Tid t, string msg = "Mailbox full") @safe pure nothrow @nogc
-    {
-        super(msg);
-        tid = t;
-    }
-
-    Tid tid;
-}
-
-/**
  * Thrown when a Tid is missing, e.g. when `ownerTid` doesn't
  * find an owner thread.
  */
@@ -857,80 +841,6 @@ do
     }));
 }
 
-// MessageBox Limits
-
-/**
- * These behaviors may be specified when a mailbox is full.
- */
-enum OnCrowding
-{
-    block, /// Wait until room is available.
-    throwException, /// Throw a MailboxFull exception.
-    ignore /// Abort the send and return.
-}
-
-private
-{
-    bool onCrowdingBlock(Tid tid) @safe pure nothrow @nogc
-    {
-        return true;
-    }
-
-    bool onCrowdingThrow(Tid tid) @safe pure
-    {
-        throw new MailboxFull(tid);
-    }
-
-    bool onCrowdingIgnore(Tid tid) @safe pure nothrow @nogc
-    {
-        return false;
-    }
-}
-
-/**
- * Sets a maximum mailbox size.
- *
- * Sets a limit on the maximum number of user messages allowed in the mailbox.
- * If this limit is reached, the caller attempting to add a new message will
- * execute the behavior specified by doThis.  If messages is zero, the mailbox
- * is unbounded.
- *
- * Params:
- *  tid      = The Tid of the thread for which this limit should be set.
- *  messages = The maximum number of messages or zero if no limit.
- *  doThis   = The behavior executed when a message is sent to a full
- *             mailbox.
- */
-void setMaxMailboxSize(Tid tid, size_t messages, OnCrowding doThis) @safe pure
-{
-    final switch (doThis)
-    {
-    case OnCrowding.block:
-        return tid.mbox.setMaxMsgs(messages, &onCrowdingBlock);
-    case OnCrowding.throwException:
-        return tid.mbox.setMaxMsgs(messages, &onCrowdingThrow);
-    case OnCrowding.ignore:
-        return tid.mbox.setMaxMsgs(messages, &onCrowdingIgnore);
-    }
-}
-
-/**
- * Sets a maximum mailbox size.
- *
- * Sets a limit on the maximum number of user messages allowed in the mailbox.
- * If this limit is reached, the caller attempting to add a new message will
- * execute onCrowdingDoThis.  If messages is zero, the mailbox is unbounded.
- *
- * Params:
- *  tid      = The Tid of the thread for which this limit should be set.
- *  messages = The maximum number of messages or zero if no limit.
- *  onCrowdingDoThis = The routine called when a message is sent to a full
- *                     mailbox.
- */
-void setMaxMailboxSize(Tid tid, size_t messages, bool function(Tid) onCrowdingDoThis)
-{
-    tid.mbox.setMaxMsgs(messages, onCrowdingDoThis);
-}
 
 /**
  * Encapsulates all implementation-level data needed for scheduling.
@@ -1228,26 +1138,6 @@ package
             synchronized (m_lock)
             {
                 return m_closed;
-            }
-        }
-
-        /*
-         * Sets a limit on the maximum number of user messages allowed in the
-         * mailbox.  If this limit is reached, the caller attempting to add
-         * a new message will execute call.  If num is zero, there is no limit
-         * on the message queue.
-         *
-         * Params:
-         *  num  = The maximum size of the queue or zero if the queue is
-         *         unbounded.
-         *  call = The routine to call when the queue is full.
-         */
-        final void setMaxMsgs(size_t num, bool function(Tid) call) @safe @nogc pure
-        {
-            synchronized (m_lock)
-            {
-                m_maxMsgs = num;
-                m_onMaxMsgs = call;
             }
         }
 
@@ -1776,48 +1666,6 @@ package
         Node* m_last;
         size_t m_count;
     }
-}
-
-@system unittest
-{
-    import std.typecons : tuple, Tuple;
-
-    static void testfn(Tid self, Tid tid)
-    {
-        self.receive((float val) { assert(0); }, (int val, int val2) {
-            assert(val == 42 && val2 == 86);
-        });
-        self.receive((Tuple!(int, int) val) { assert(val[0] == 42 && val[1] == 86); });
-        self.receive((Variant val) {  });
-        self.receive((string val) {
-            if ("the quick brown fox" != val)
-                return false;
-            return true;
-        }, (string val) { assert(false); });
-        prioritySend(tid, "done");
-    }
-
-    static void runTest(Tid self, Tid tid)
-    {
-        send(tid, 42, 86);
-        send(tid, tuple(42, 86));
-        send(tid, "hello", "there");
-        send(tid, "the quick brown fox");
-        self.receive((string val) { assert(val == "done"); });
-    }
-
-    static void simpleTest(Tid self)
-    {
-        auto tid = spawn(&testfn, self);
-        runTest(self, tid);
-
-        // Run the test again with a limited mailbox size.
-        tid = spawn(&testfn, self);
-        setMaxMailboxSize(tid, 2, OnCrowding.block);
-        runTest(self, tid);
-    }
-
-    simpleTest(thisTid());
 }
 
 // test ability to send shared arrays
