@@ -468,14 +468,11 @@ public final class RemoteAPI (API) : API
         Variant[] await_msgs;
 
         try scheduler.start(() {
-                bool terminated = false;
-                while (!terminated)
+                while (1)
                 {
                     C.receiveTimeout(C.thisTid(), 10.msecs,
-                        (C.OwnerTerminated e) { terminated = true; },
-                        (ShutdownCommand e) {
-                            terminated = true;
-                        },
+                        (C.OwnerTerminated e) { throw exc; },
+                        (ShutdownCommand e) { throw exc; },
                         (TimeCommand s)      {
                             control.sleep_until = Clock.currTime + s.dur;
                             control.drop = s.drop;
@@ -505,8 +502,6 @@ public final class RemoteAPI (API) : API
                         assumeSafeAppend(await_msgs);
                     }
                 }
-                // Make sure the scheduler is not waiting for polling tasks
-                throw exc;
             });
         catch (Exception e)
             if (e !is exc)
@@ -1593,4 +1588,46 @@ unittest
     {
         assert(ex.msg == `"Request timed-out"`);
     }
+}
+
+unittest
+{
+    import core.thread : thread_joinAll;
+    static import geod24.concurrency;
+    __gshared C.Tid node_tid;
+
+    static interface API
+    {
+        void segfault ();
+        void check ();
+    }
+
+    import std.stdio;
+
+    static class Node : API
+    {
+        override void segfault ()
+        {
+            int* ptr; *ptr = 1;
+        }
+
+        override void check ()
+        {
+            auto node = new RemoteAPI!API(node_tid);
+
+            // We need to return immediately so that the main thread can continue testing
+            runTask(() {
+                node.ctrl.sleep(500.msecs);
+                node.segfault();
+            });
+        }
+    }
+
+    auto node_1 = RemoteAPI!API.spawn!Node();
+    auto node_2 = RemoteAPI!API.spawn!Node();
+    node_tid = node_2.tid;
+    node_1.check();
+    node_2.ctrl.shutdown();  // shut it down before wake-up, segfault() command will be ignored
+    node_1.ctrl.shutdown();
+    thread_joinAll();
 }
