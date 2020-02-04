@@ -115,7 +115,6 @@ private
     enum MsgType
     {
         standard,
-        priority,
         linkDead,
     }
 
@@ -271,26 +270,6 @@ class LinkTerminated : Exception
     }
 
     Tid tid;
-}
-
-/**
- * Thrown if a message was sent to a thread via
- * $(REF prioritySend, std,concurrency) and the receiver does not have a handler
- * for a message of this type.
- */
-class PriorityMessageException : Exception
-{
-    ///
-    this(Variant vals)
-    {
-        super("Priority message");
-        message = vals;
-    }
-
-    /**
-     * The message that was sent.
-     */
-    Variant message;
 }
 
 /**
@@ -567,19 +546,6 @@ void send(T...)(Tid tid, T vals)
 {
     static assert(!hasLocalAliasing!(T), "Aliases to mutable thread-local data not allowed.");
     _send(MsgType.standard, tid, vals);
-}
-
-/**
- * Places the values as a message on the front of tid's message queue.
- *
- * Send a message to `tid` but place it at the front of `tid`'s message
- * queue instead of at the back.  This function is typically used for
- * out-of-band communication, to signal exceptional conditions, etc.
- */
-void prioritySend(T...)(Tid tid, T vals)
-{
-    static assert(!hasLocalAliasing!(T), "Aliases to mutable thread-local data not allowed.");
-    _send(MsgType.priority, tid, vals);
 }
 
 /*
@@ -1163,12 +1129,6 @@ package class MessageBox
             {
                 while (true)
                 {
-                    if (isPriorityMsg(msg))
-                    {
-                        m_sharedPty.put(msg);
-                        m_putMsg.notify();
-                        return;
-                    }
                     if (!mboxFull() || isControlMsg(msg))
                     {
                         m_sharedBox.put(msg);
@@ -1319,27 +1279,6 @@ package class MessageBox
             return false;
         }
 
-        bool pty(ref ListT list)
-        {
-            if (!list.empty)
-            {
-                auto range = list[];
-
-                if (onStandardMsg(range.front))
-                {
-                    list.removeAt(range);
-                    return true;
-                }
-                if (range.front.convertsTo!(Throwable))
-                    throw range.front.get!(Throwable);
-                else if (range.front.convertsTo!(shared(Throwable)))
-                    throw range.front.get!(shared(Throwable));
-                else
-                    throw new PriorityMessageException(range.front.data);
-            }
-            return false;
-        }
-
         static if (timedWait)
         {
             import core.time : MonoTime;
@@ -1350,7 +1289,7 @@ package class MessageBox
         {
             ListT arrived;
 
-            if (pty(m_localPty) || scan(m_localBox))
+            if (scan(m_localBox))
             {
                 return true;
             }
@@ -1358,7 +1297,7 @@ package class MessageBox
             synchronized (m_lock)
             {
                 updateMsgCount();
-                while (m_sharedPty.empty && m_sharedBox.empty)
+                while (m_sharedBox.empty)
                 {
                     // NOTE: We're notifying all waiters here instead of just
                     //       a few because the onCrowding behavior may have
@@ -1378,28 +1317,14 @@ package class MessageBox
                         m_putMsg.wait();
                     }
                 }
-                m_localPty.put(m_sharedPty);
                 arrived.put(m_sharedBox);
             }
-            if (m_localPty.empty)
-            {
-                scope (exit) m_localBox.put(arrived);
-                if (scan(arrived))
-                {
-                    return true;
-                }
-                else
-                {
-                    static if (timedWait)
-                    {
-                        period = limit - MonoTime.currTime;
-                    }
-                    continue;
-                }
-            }
-            m_localBox.put(arrived);
-            pty(m_localPty);
-            return true;
+            scope (exit) m_localBox.put(arrived);
+            if (scan(arrived))
+                return true;
+
+            static if (timedWait)
+                period = limit - MonoTime.currTime;
         }
     }
 
@@ -1456,12 +1381,7 @@ private:
 
     bool isControlMsg(ref Message msg) @safe @nogc pure nothrow
     {
-        return msg.type != MsgType.standard && msg.type != MsgType.priority;
-    }
-
-    bool isPriorityMsg(ref Message msg) @safe @nogc pure nothrow
-    {
-        return msg.type == MsgType.priority;
+        return msg.type != MsgType.standard;
     }
 
     bool isLinkDeadMsg(ref Message msg) @safe @nogc pure nothrow
@@ -1473,14 +1393,12 @@ private:
     alias ListT = List!(Message);
 
     ListT m_localBox;
-    ListT m_localPty;
 
     Mutex m_lock;
     Condition m_putMsg;
     Condition m_notFull;
     size_t m_putQueue;
     ListT m_sharedBox;
-    ListT m_sharedPty;
     OnMaxFn m_onMaxMsgs;
     size_t m_localMsgs;
     size_t m_maxMsgs;
