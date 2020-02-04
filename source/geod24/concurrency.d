@@ -1093,7 +1093,6 @@ package class MessageBox
         m_closed = false;
 
         m_putMsg = new Condition(m_lock);
-        m_notFull = new Condition(m_lock);
     }
 
     ///
@@ -1123,27 +1122,11 @@ package class MessageBox
     {
         synchronized (m_lock)
         {
-            // TODO: Generate an error here if m_closed is true, or maybe
-            //       put a message in the caller's queue?
-            if (!m_closed)
-            {
-                while (true)
-                {
-                    if (!mboxFull() || isControlMsg(msg))
-                    {
-                        m_sharedBox.put(msg);
-                        m_putMsg.notify();
-                        return;
-                    }
-                    if (m_onMaxMsgs !is null && !m_onMaxMsgs(thisTid))
-                    {
-                        return;
-                    }
-                    m_putQueue++;
-                    m_notFull.wait();
-                    m_putQueue--;
-                }
-            }
+            // Note: This keeps the lock, potentially blocking other coroutines
+            if (m_closed)
+                assert(0, "Error: MessageBox is closed");
+            m_sharedBox.put(msg);
+            m_putMsg.notify();
         }
     }
 
@@ -1299,14 +1282,6 @@ package class MessageBox
                 updateMsgCount();
                 while (m_sharedBox.empty)
                 {
-                    // NOTE: We're notifying all waiters here instead of just
-                    //       a few because the onCrowding behavior may have
-                    //       changed and we don't want to block sender threads
-                    //       unnecessarily if the new behavior is not to block.
-                    //       This will admittedly result in spurious wakeups
-                    //       in other situations, but what can you do?
-                    if (m_putQueue && !mboxFull())
-                        m_notFull.notifyAll();
                     static if (timedWait)
                     {
                         if (period <= Duration.zero || !m_putMsg.wait(period))
@@ -1369,11 +1344,6 @@ package class MessageBox
 private:
     // Routines involving local data only, no lock needed.
 
-    bool mboxFull() @safe @nogc pure nothrow
-    {
-        return m_maxMsgs && m_maxMsgs <= m_localMsgs + m_sharedBox.length;
-    }
-
     void updateMsgCount() @safe @nogc pure nothrow
     {
         m_localMsgs = m_localBox.length;
@@ -1396,12 +1366,9 @@ private:
 
     Mutex m_lock;
     Condition m_putMsg;
-    Condition m_notFull;
-    size_t m_putQueue;
     ListT m_sharedBox;
     OnMaxFn m_onMaxMsgs;
     size_t m_localMsgs;
-    size_t m_maxMsgs;
     bool m_closed;
 }
 
