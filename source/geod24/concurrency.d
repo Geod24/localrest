@@ -43,7 +43,6 @@ import core.sync.condition;
 import core.sync.mutex;
 import core.thread;
 import std.range.primitives;
-import std.range.interfaces : InputRange;
 import std.traits;
 
 ///
