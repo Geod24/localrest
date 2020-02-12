@@ -899,52 +899,6 @@ public class InfoThread : Thread
 
 
 /**
- * An example Scheduler using kernel threads.
- *
- * This is an example Scheduler that mirrors the default scheduling behavior
- * of creating one kernel thread per call to spawn.  It is fully functional
- * and may be instantiated and used, but is not a necessary part of the
- * default functioning of this module.
- */
-class ThreadScheduler
-{
-    /**
-     * This simply runs op directly, since no real scheduling is needed by
-     * this approach.
-     */
-    void start(void delegate() op)
-    {
-        op();
-    }
-
-    /**
-     * Creates a new kernel thread and assigns it to run the supplied op.
-     */
-    void spawn(void delegate() op)
-    {
-        auto t = new Thread(op);
-        t.start();
-    }
-
-    /**
-     * Returns ThreadInfo.thisInfo, since it is a thread-local instance of
-     * ThreadInfo, which is the correct behavior for this scheduler.
-     */
-    @property ref ThreadInfo thisInfo() nothrow
-    {
-        return ThreadInfo.thisInfo;
-    }
-
-    /**
-     * Creates a new Condition variable.  No custom behavior is needed here.
-     */
-    Condition newCondition(Mutex m) nothrow
-    {
-        return new Condition(m);
-    }
-}
-
-/**
  * An example Scheduler using Fibers.
  *
  * This is an example scheduler that creates a new Fiber per call to spawn
