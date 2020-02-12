@@ -294,8 +294,6 @@ public final class RemoteAPI (API) : API
         Note:
           When the `RemoteAPI` returned by this function is finalized,
           the child thread will be shut down.
-          This ownership mechanism should be replaced with reference counting
-          in a later version.
 
         Params:
           Impl = Type of the implementation to instantiate
@@ -311,7 +309,7 @@ public final class RemoteAPI (API) : API
         Duration timeout = Duration.init)
     {
         auto childTid = C.spawn(&spawned!(Impl), args);
-        return new RemoteAPI(childTid, true, timeout);
+        return new RemoteAPI(childTid, timeout);
     }
 
     /// Helper template to get the constructor's parameters
@@ -511,9 +509,6 @@ public final class RemoteAPI (API) : API
     /// Where to send message to
     private C.Tid childTid;
 
-    /// Whether or not the destructor should destroy the thread
-    private bool owner;
-
     /// Timeout to use when issuing requests
     private const Duration timeout;
 
@@ -536,14 +531,7 @@ public final class RemoteAPI (API) : API
 
     public this (C.Tid tid, Duration timeout = Duration.init) @nogc pure nothrow
     {
-        this(tid, false, timeout);
-    }
-
-    /// Private overload used by `spawn`
-    private this (C.Tid tid, bool isOwner, Duration timeout) @nogc pure nothrow
-    {
         this.childTid = tid;
-        this.owner = isOwner;
         this.timeout = timeout;
     }
 
