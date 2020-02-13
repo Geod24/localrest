@@ -217,6 +217,11 @@ private
 
     @property ref ThreadInfo thisInfo() nothrow
     {
+        auto t = cast(InfoThread)Thread.getThis();
+
+        if (t !is null)
+            return t.info;
+
         return ThreadInfo.thisInfo;
     }
 }
@@ -485,7 +490,7 @@ if (isSpawnable!(F, T))
     }
 
     // TODO: MessageList and &exec should be shared.
-    auto t = new Thread(&exec);
+    auto t = new InfoThread(&exec);
     t.start();
     return spawnTid;
 }
@@ -994,6 +999,12 @@ class FiberScheduler
 
         if (f !is null)
             return f.info;
+
+        auto t = cast(InfoThread)Thread.getThis();
+
+        if (t !is null)
+            return t.info;
+
         return ThreadInfo.thisInfo;
     }
 
