@@ -42,6 +42,7 @@ import core.atomic;
 import core.sync.condition;
 import core.sync.mutex;
 import core.thread;
+import std.container;
 import std.range.primitives;
 import std.traits;
 
@@ -1571,4 +1572,175 @@ private:
     auto self = thisTid();
     self.receiveOnly!(bool);
     assert(x[0] == 5);
+}
+
+
+/*******************************************************************************
+
+    This is similar to go buffered channels
+
+    Params:
+        T = The type of message to deliver. (int, string, struct, ......)
+
+*******************************************************************************/
+
+public class Channel (T)
+{
+    /// closed
+    private bool closed;
+
+    /// lock for queue and status
+    private Mutex mutex;
+
+    /// queue of data
+    private DList!T queue;
+
+    /// Ctor
+    public this ()
+    {
+        this.closed = false;
+        this.mutex = new Mutex;
+    }
+
+
+    /***************************************************************************
+
+        Send data `msg`.
+
+        Params:
+            msg = message to send
+
+        Return:
+            If successful, return true, otherwise return false
+
+    ***************************************************************************/
+
+    public bool send (T msg)
+    {
+        this.mutex.lock();
+        scope (exit)
+            this.mutex.unlock();
+
+        if (this.closed)
+            return false;
+
+        this.queue.insertBack(msg);
+        return true;
+    }
+
+
+    /***************************************************************************
+
+        Return the received message.
+
+        Return:
+            msg = message to receive
+
+    ***************************************************************************/
+
+    public T receive ()
+    {
+        T msg;
+        while (!tryReceive(&msg))
+        {
+            FiberScheduler.yield();
+        }
+        return msg;
+    }
+
+
+    /***************************************************************************
+
+	    Return the received message.
+
+        Params:
+            msg = point of message to send
+
+        Return:
+            If successful, return true, otherwise return false
+
+    ***************************************************************************/
+
+    public bool tryReceive (T* msg)
+    {
+        assert(msg !is null);
+
+        this.mutex.lock();
+        scope (exit)
+            this.mutex.unlock();
+
+        if (this.closed)
+            return false;
+
+        if (!this.queue.empty)
+        {
+            *(msg) = this.queue.front;
+            this.queue.removeFront();
+            return true;
+        }
+
+        return false;
+    }
+
+
+    /***************************************************************************
+
+        Return closing status
+
+        Return:
+            If channel is closed, return true, otherwise return false
+
+    ***************************************************************************/
+
+    public @property bool isClosed ()
+    {
+        synchronized (this.mutex)
+        {
+            return this.closed;
+        }
+    }
+
+
+    /***************************************************************************
+
+        Close Channel
+
+    ***************************************************************************/
+
+    public void close ()
+    {
+        this.mutex.lock();
+        scope (exit) this.mutex.unlock();
+
+        this.closed = true;
+        this.queue.clear();
+    }
+}
+
+/// Test of a buffered channel
+unittest
+{
+    void mainTask (FiberScheduler scheduler)
+    {
+        void otherTask (T) (FiberScheduler sch, Channel!T chan)
+        {
+            sch.spawn({
+                assert(chan.receive() == "Hello World");
+                assert(chan.receive() == "Handing off");
+            });
+        }
+
+        auto chan = new Channel!string;
+
+        otherTask(scheduler, chan);
+
+        chan.send("Hello World");
+        chan.send("Handing off");
+    }
+
+    /// Create FiberScheduler of main thread
+    auto scheduler = new FiberScheduler();
+    scheduler.start({
+        mainTask(scheduler);
+    });
 }
