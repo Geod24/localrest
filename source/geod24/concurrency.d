@@ -849,6 +849,51 @@ struct ThreadInfo
     }
 }
 
+
+/***************************************************************************
+
+    Thread with ThreadInfo,
+    This is implemented to avoid using global variables.
+
+***************************************************************************/
+
+public class InfoThread : Thread
+{
+    public ThreadInfo info;
+
+    /***************************************************************************
+
+        Initializes a thread object which is associated with a static
+
+        Params:
+            fn = The thread function.
+            sz = The stack size for this thread.
+
+    ***************************************************************************/
+
+    this (void function() fn, size_t sz = 0) @safe pure nothrow @nogc
+    {
+        super(fn, sz);
+    }
+
+
+    /***************************************************************************
+
+        Initializes a thread object which is associated with a dynamic
+
+        Params:
+            dg = The thread function.
+            sz = The stack size for this thread.
+
+    ***************************************************************************/
+
+    this (void delegate() dg, size_t sz = 0) @safe pure nothrow @nogc
+    {
+        super(dg, sz);
+    }
+}
+
+
 /**
  * An example Scheduler using kernel threads.
  *
