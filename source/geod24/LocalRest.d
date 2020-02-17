@@ -78,6 +78,8 @@
 
 module geod24.LocalRest;
 
+import geod24.LocalRestMessage;
+
 import vibe.data.json;
 
 static import C = geod24.concurrency;
@@ -87,73 +89,6 @@ import std.traits : Parameters, ReturnType;
 import core.thread;
 import core.time;
 
-
-/// Data sent by the caller
-private struct Command
-{
-    /// Tid of the sender thread (cannot be JSON serialized)
-    C.Tid sender;
-    /// In order to support re-entrancy, every request contains an id
-    /// which should be copied in the `Response`
-    /// Initialized to `size_t.max` so not setting it crashes the program
-    size_t id = size_t.max;
-    /// Method to call
-    string method;
-    /// Arguments to the method, JSON formatted
-    string args;
-}
-
-/// Ask the node to exhibit a certain behavior for a given time
-private struct TimeCommand
-{
-    /// For how long our remote node apply this behavior
-    Duration dur;
-    /// Whether or not affected messages should be dropped
-    bool drop = false;
-}
-
-/// Ask the node to shut down
-private struct ShutdownCommand
-{
-}
-
-/// Filter out requests before they reach a node
-private struct FilterAPI
-{
-    /// the mangled symbol name of the function to filter
-    string func_mangleof;
-
-    /// used for debugging
-    string pretty_func;
-}
-
-/// Status of a request
-private enum Status
-{
-    /// Request failed
-    Failed,
-
-    /// Request timed-out
-    Timeout,
-
-    /// Request succeeded
-    Success
-}
-
-/// Data sent by the callee back to the caller
-private struct Response
-{
-    /// Final status of a request (failed, timeout, success, etc)
-    Status status;
-    /// In order to support re-entrancy, every request contains an id
-    /// which should be copied in the `Response` so the scheduler can
-    /// properly dispatch this event
-    /// Initialized to `size_t.max` so not setting it crashes the program
-    size_t id;
-    /// If `status == Status.Success`, the JSON-serialized return value.
-    /// Otherwise, it contains `Exception.toString()`.
-    string data;
-}
 
 /// Simple wrapper to deal with tuples
 /// Vibe.d might emit a pragma(msg) when T.length == 0
