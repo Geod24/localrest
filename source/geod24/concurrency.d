@@ -1608,7 +1608,32 @@ private:
 
 /*******************************************************************************
 
-    This is similar to go buffered channels
+    This is similar to go channels.
+
+    If you set the size of the queue to 0 in the constructor,
+    you can create unbuffered channel.
+
+    There are two kinds of fiber(thread). One reads, and one writes.
+
+    1.  buffered channel
+        When the write-fiber(thread) is working,
+        it puts the message in the queue.
+
+        When the read-fiber(thread) is working,
+        take the message out of the queue and take it.
+        If there are no messages in the queue, wait for write-fiber(thread) to put
+        the messages in the queue.
+
+    2.  unbuffered channel
+        When the write-fiber(thread) is working,
+        it sends the data to the read-fiber(thread) if it already exists.
+        Otherwise, the write-fiber(thread) waits for the read-fiber(thread)
+        to come in.
+
+        When read-fiber(thread) works,
+        it imports data from the write-fiber(thread) if it already exists.
+        Otherwise, the read-fiber(thread) waits for the write-fiber(thread)
+        to come in.
 
     Params:
         T = The type of message to deliver. (int, string, struct, ......)
@@ -1623,14 +1648,38 @@ public class Channel (T)
     /// lock for queue and status
     private Mutex mutex;
 
+    /// size of queue
+    private size_t qsize;
+
     /// queue of data
     private DList!T queue;
 
-    /// Ctor
-    public this ()
+    /// the number of message in queue
+    private size_t mcount;
+
+    /// collection of send waiters
+    private DList!(ChannelContext!T) sendq;
+
+    /// collection of recv waiters
+    private DList!(ChannelContext!T) recvq;
+
+
+    /***************************************************************************
+
+        Creator
+
+        Params:
+            qsize = If this is 0, it becomes a unbuffered channel.
+            Otherwise, it has a buffer size as large as qsize.
+
+    ***************************************************************************/
+
+    public this (size_t qsize = 0)
     {
         this.closed = false;
         this.mutex = new Mutex;
+        this.qsize = qsize;
+        this.mcount = 0;
     }
 
 
@@ -1649,14 +1698,56 @@ public class Channel (T)
     public bool send (T msg)
     {
         this.mutex.lock();
-        scope (exit)
-            this.mutex.unlock();
 
         if (this.closed)
+        {
+            this.mutex.unlock();
             return false;
+        }
 
-        this.queue.insertBack(msg);
-        return true;
+        if (!this.recvq.empty)
+        {
+            ChannelContext!T context = this.recvq.front;
+            this.recvq.removeFront();
+            *(context.msg_ptr) = msg;
+            this.mutex.unlock();
+            context.notify();
+            return true;
+        }
+
+        if (this.mcount < this.qsize)
+        {
+            this.queue.insertBack(msg);
+            this.mcount++;
+            this.mutex.unlock();
+            return true;
+        }
+
+        void waitForReader (Mutex mutex, Condition condition)
+        {
+            ChannelContext!T new_context;
+            new_context.msg_ptr = null;
+            new_context.msg = msg;
+            new_context.mutex = mutex;
+            new_context.condition = condition;
+            this.sendq.insertBack(new_context);
+            this.mutex.unlock();
+            new_context.wait();
+        }
+
+        // queue is full or channel is unbuffered
+        auto scheduler = thisScheduler;
+        if (Fiber.getThis() && scheduler !is null)
+        {
+            waitForReader(null, scheduler.newCondition(null));
+            return true;
+        }
+        else
+        {
+            auto mutex = new Mutex();
+            waitForReader(mutex, new Condition(mutex));
+            return true;
+        }
     }
 
 
@@ -1671,12 +1762,59 @@ public class Channel (T)
 
     public T receive ()
     {
-        T msg;
-        while (!tryReceive(&msg))
+        this.mutex.lock();
+
+        if (this.closed)
         {
-            FiberScheduler.yield();
+            this.mutex.unlock();
+            assert(0, "Channel is closed.");
         }
-        return msg;
+
+        if (!this.sendq.empty)
+        {
+            T msg;
+            ChannelContext!T context = this.sendq.front;
+            this.sendq.removeFront();
+            msg = context.msg;
+            this.mutex.unlock();
+            context.notify();
+            return msg;
+        }
+
+        if (!this.queue.empty)
+        {
+            T msg;
+            msg = this.queue.front;
+            this.queue.removeFront();
+            assert(this.mcount > 0, "mcount was zero!");
+            this.mcount--;
+            this.mutex.unlock();
+            return msg;
+        }
+
+        T waitForSender (Mutex mutex, Condition condition)
+        {
+            T msg;
+            ChannelContext!T new_context;
+            new_context.msg_ptr = &msg;
+            new_context.mutex = mutex;
+            new_context.condition = condition;
+            this.recvq.insertBack(new_context);
+            this.mutex.unlock();
+            new_context.wait();
+            return msg;
+        }
+
+        auto scheduler = thisScheduler;
+        if (Fiber.getThis() && scheduler !is null)
+        {
+            return waitForSender(null, scheduler.newCondition(null));
+        }
+        else
+        {
+            auto mutex = new Mutex();
+            return waitForSender(mutex, new Condition(mutex));
+        }
     }
 
 
@@ -1697,19 +1835,34 @@ public class Channel (T)
         assert(msg !is null);
 
         this.mutex.lock();
-        scope (exit)
-            this.mutex.unlock();
 
         if (this.closed)
+        {
+            this.mutex.unlock();
             return false;
+        }
+
+        if (!this.sendq.empty)
+        {
+            ChannelContext!T context = this.sendq.front;
+            this.sendq.removeFront();
+            *(msg) = context.msg;
+            this.mutex.unlock();
+            context.notify();
+            return true;
+        }
 
         if (!this.queue.empty)
         {
             *(msg) = this.queue.front;
             this.queue.removeFront();
+            assert(this.mcount > 0, "mcount was zero!");
+            this.mcount--;
+            this.mutex.unlock();
             return true;
         }
 
+        this.mutex.unlock();
         return false;
     }
 
@@ -1734,44 +1887,166 @@ public class Channel (T)
 
     /***************************************************************************
 
-        Close Channel
+        Called when the channel is no longer in use.
+        This function turns off Fiber and Thread, which were waiting for
+        the message to pass.
+        And remove the message that was in the queue.
+        And once closed, the channel is no longer available for message passing.
 
     ***************************************************************************/
 
     public void close ()
     {
+        ChannelContext!T context;
+
         this.mutex.lock();
         scope (exit) this.mutex.unlock();
 
         this.closed = true;
+
+        while (true)
+        {
+            if (this.recvq.empty)
+                break;
+
+            context = this.recvq.front;
+            this.recvq.removeFront();
+            context.notify();
+        }
+
         this.queue.clear();
+        this.mcount = 0;
+
+        while (true)
+        {
+            if (this.sendq.empty)
+                break;
+
+            context = this.sendq.front;
+            this.sendq.removeFront();
+            context.notify();
+        }
+    }
+}
+
+/***************************************************************************
+
+    A structure to be stored in a queue.
+    It has information to use in standby.
+
+***************************************************************************/
+
+private struct ChannelContext (T)
+{
+    /// This is a message. Used in put
+    public T  msg;
+
+    /// This is a message point. Used in get
+    public T* msg_ptr;
+
+    //  Waiting Condition
+    public Condition condition;
+
+    /// lock for thread waiting
+    public Mutex mutex;
+}
+
+private void wait (T) (ChannelContext!T context)
+{
+    if (context.condition is null)
+        return;
+
+    if (context.mutex is null)
+        context.condition.wait();
+    else
+    {
+        synchronized(context.mutex)
+        {
+            context.condition.wait();
+        }
+    }
+}
+
+private void notify (T) (ChannelContext!T context)
+{
+    if (context.condition is null)
+        return;
+
+    if (context.mutex is null)
+        context.condition.notify();
+    else
+    {
+        synchronized(context.mutex)
+        {
+            context.condition.notify();
+        }
     }
 }
 
 /// Test of a buffered channel
 unittest
 {
-    void mainTask (FiberScheduler scheduler)
+    void mainTask ()
     {
-        void otherTask (T) (FiberScheduler sch, Channel!T chan)
+        void otherTask (T) (Channel!T chan)
         {
-            sch.spawn({
+            thisScheduler.spawn({
                 assert(chan.receive() == "Hello World");
                 assert(chan.receive() == "Handing off");
             });
         }
 
-        auto chan = new Channel!string;
+        auto chan = new Channel!string(2);
 
-        otherTask(scheduler, chan);
+        otherTask(chan);
 
         chan.send("Hello World");
         chan.send("Handing off");
     }
 
     /// Create FiberScheduler of main thread
-    auto scheduler = new FiberScheduler();
-    scheduler.start({
-        mainTask(scheduler);
+    thisScheduler = new FiberScheduler();
+    thisScheduler.start({
+        mainTask();
     });
+}
+
+/// Test of a unbuffered channel
+unittest
+{
+    string[] results;
+    void mainTask ()
+    {
+        void otherTask (T) (Channel!T chan)
+        {
+            thisScheduler.spawn({
+                results ~= "+ Ping";
+                chan.receive();
+                results ~= "+ Ping";
+                chan.receive();
+                results ~= "+ Ping";
+                chan.receive();
+            });
+        }
+
+        auto chan = new Channel!int(0);
+
+        otherTask(chan);
+
+        results ~= "* Ping";
+        chan.send(42);
+        results ~= "* Ping";
+        chan.send(42);
+        results ~= "* Ping";
+        chan.send(42);
+        results ~= "* Boom";
+    }
+
+    /// Create FiberScheduler of main thread
+    thisScheduler = new FiberScheduler();
+    thisScheduler.start({
+        mainTask();
+    });
+
+    assert(results == ["+ Ping", "* Ping", "+ Ping", "* Ping", "+ Ping", "* Ping", "* Boom"]);
 }
