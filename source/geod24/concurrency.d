@@ -214,16 +214,16 @@ private
             }
         }
     }
+}
 
-    @property ref ThreadInfo thisInfo() nothrow
-    {
-        auto t = cast(InfoThread)Thread.getThis();
+public @property ref ThreadInfo thisInfo() nothrow
+{
+    auto t = cast(InfoThread)Thread.getThis();
 
-        if (t !is null)
-            return t.info;
+    if (t !is null)
+        return t.info;
 
-        return ThreadInfo.thisInfo;
-    }
+    return ThreadInfo.thisInfo;
 }
 
 static ~this()
