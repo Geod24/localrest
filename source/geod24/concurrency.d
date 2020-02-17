@@ -2050,3 +2050,331 @@ unittest
 
     assert(results == ["+ Ping", "* Ping", "+ Ping", "* Ping", "+ Ping", "* Ping", "* Boom"]);
 }
+
+/// spawn thread
+version (unittest) void spawnThread (void delegate() op)
+{
+    auto t1 = new InfoThread({
+        thisScheduler = new FiberScheduler();
+        op();
+    });
+    t1.start();
+}
+
+/// Min Thread -> [ channel1 ] -> Thread1 -> [ channel2 ] -> Min Thread
+unittest
+{
+    auto channel1 = new Channel!int;
+    auto channel2 = new Channel!int;
+
+    // Thread1
+    spawnThread({
+        int msg = channel1.receive();
+        channel2.send(msg*msg);
+    });
+
+    // Main Thread1
+    channel1.send(2);
+    assert(channel2.receive() == 4);
+}
+
+
+/// Min Thread -> [ channel1 ] -> Fiber1 in Thread1 -> [ channel2 ] -> Min Thread
+unittest
+{
+    auto channel1 = new Channel!int;
+    auto channel2 = new Channel!int;
+
+    // Thread1
+    spawnThread({
+        // Fiber1
+        thisScheduler.start({
+            int msg = channel1.receive();
+            channel2.send(msg*msg);
+        });
+    });
+
+    // Main Thread
+    channel1.send(2);
+    assert(channel2.receive() == 4);
+}
+
+/// Fiber in Min Thread -> [ channel1 ] -> Fiber1 in Thread1 -> [ channel2 ] -> Fiber in Min Thread
+unittest
+{
+    auto channel1 = new Channel!int;
+    auto channel2 = new Channel!int;
+    int result;
+
+    // Thread1
+    spawnThread({
+        // Fiber1
+        thisScheduler.start({
+            int msg = channel1.receive();
+            channel2.send(msg*msg);
+        });
+    });
+
+    // Main Thread
+    thisScheduler = new FiberScheduler();
+    thisScheduler.start({
+        channel1.send(2);
+        result = channel2.receive();
+    });
+    assert(result == 4);
+}
+
+/// Fiber1 -> [ channel2 ] -> Fiber2 -> [ channel1 ] -> Fiber1
+unittest
+{
+    auto channel1 = new Channel!int;
+    auto channel2 = new Channel!int;
+    int result;
+
+    Mutex mutex = new Mutex;
+    Condition condition = new Condition(mutex);
+
+    // Thread1
+    spawnThread({
+        scope scheduler = thisScheduler;
+        scheduler.start({
+            //  Fiber1
+            scheduler.spawn({
+                channel2.send(2);
+                result = channel1.receive();
+                synchronized (mutex)
+                {
+                    condition.notify;
+                }
+            });
+            //  Fiber2
+            scheduler.spawn({
+                int msg = channel2.receive();
+                channel1.send(msg*msg);
+            });
+        });
+    });
+
+    synchronized (mutex)
+    {
+        condition.wait(1000.msecs);
+    }
+
+    assert(result == 4);
+}
+
+
+/// Fiber1 in Thread1 -> [ channel2 ] -> Fiber2 in Thread2 -> [ channel1 ] -> Fiber1 in Thread1
+unittest
+{
+    auto channel1 = new Channel!int;
+    auto channel2 = new Channel!int;
+    int result;
+
+    Mutex mutex = new Mutex;
+    Condition condition = new Condition(mutex);
+
+    // Thread1
+    spawnThread({
+        // Fiber1
+        thisScheduler.start({
+            channel2.send(2);
+            result = channel1.receive();
+            synchronized (mutex)
+            {
+                condition.notify;
+            }
+        });
+    });
+
+    // Thread2
+    spawnThread({
+        // Fiber2
+        thisScheduler.start({
+            int msg = channel2.receive();
+            channel1.send(msg*msg);
+        });
+    });
+
+    synchronized (mutex)
+    {
+        condition.wait(1000.msecs);
+    }
+    assert(result == 4);
+}
+
+
+/// Thread1 -> [ channel2 ] -> Thread2 -> [ channel1 ] -> Thread1
+unittest
+{
+    auto channel1 = new Channel!int;
+    auto channel2 = new Channel!int;
+    int result;
+
+    Mutex mutex = new Mutex;
+    Condition condition = new Condition(mutex);
+
+    // Thread1
+    spawnThread({
+        channel2.send(2);
+        result = channel1.receive();
+        synchronized (mutex)
+        {
+            condition.notify;
+        }
+    });
+
+    // Thread2
+    spawnThread({
+        int msg = channel2.receive();
+        channel1.send(msg*msg);
+    });
+
+    synchronized (mutex)
+    {
+        condition.wait(3000.msecs);
+    }
+
+    assert(result == 4);
+}
+
+
+/// Thread1 -> [ channel2 ] -> Fiber1 in Thread 2 -> [ channel1 ] -> Thread1
+unittest
+{
+    auto channel1 = new Channel!int;
+    auto channel2 = new Channel!int;
+    int result;
+
+    Mutex mutex = new Mutex;
+    Condition condition = new Condition(mutex);
+
+    // Thread1
+    spawnThread({
+        channel2.send(2);
+        result = channel1.receive();
+        synchronized (mutex)
+        {
+            condition.notify;
+        }
+    });
+
+    // Thread2
+    spawnThread({
+        // Fiber1
+        thisScheduler.start({
+            int msg = channel2.receive();
+            channel1.send(msg*msg);
+        });
+    });
+
+    synchronized (mutex)
+    {
+        condition.wait(1000.msecs);
+    }
+    assert(result == 4);
+}
+
+
+// If the queue size is 0, it will block when it is sent and received on the same thread.
+unittest
+{
+    auto channel1 = new Channel!int(0);
+    auto channel2 = new Channel!int(1);
+    int result = 0;
+
+    Mutex mutex = new Mutex;
+    Condition condition = new Condition(mutex);
+
+    // Thread1 - It'll be tangled.
+    spawnThread({
+        channel1.send(2);
+        result = channel1.receive();
+        synchronized (mutex)
+        {
+            condition.notify;
+        }
+    });
+
+    synchronized (mutex)
+    {
+        condition.wait(1000.msecs);
+    }
+    assert(result == 0);
+
+    // Thread2 - Unravel a tangle
+    spawnThread({
+        result = channel1.receive();
+        channel1.send(2);
+    });
+
+    synchronized (mutex)
+    {
+        condition.wait(1000.msecs);
+    }
+    assert(result == 2);
+
+    result = 0;
+    // Thread3 - It'll not be tangled, because queue size is 1
+    spawnThread({
+        channel2.send(2);
+        result = channel2.receive();
+        synchronized (mutex)
+        {
+            condition.notify;
+        }
+    });
+
+    synchronized (mutex)
+    {
+        condition.wait(1000.msecs);
+    }
+    assert(result == 2);
+}
+
+
+// If the queue size is 0, it will block when it is sent and received on the same fiber.
+unittest
+{
+    auto channel1 = new Channel!int(0);
+    auto channel2 = new Channel!int(1);
+    int result = 0;
+
+    // Thread1
+    spawnThread({
+
+        scope scheduler = thisScheduler;
+        scope cond = scheduler.newCondition(null);
+
+        scheduler.start({
+            //  Fiber1 - It'll be tangled.
+            scheduler.spawn({
+                channel1.send(2);
+                result = channel1.receive();
+                cond.notify();
+            });
+
+            assert(!cond.wait(1000.msecs));
+            assert(result == 0);
+
+            //  Fiber2 - Unravel a tangle
+            scheduler.spawn({
+                result = channel1.receive();
+                channel1.send(2);
+            });
+
+            cond.wait(1000.msecs);
+            assert(result == 2);
+
+            //  Fiber3 - It'll not be tangled, because queue size is 1
+            scheduler.spawn({
+                channel2.send(2);
+                result = channel2.receive();
+                cond.notify();
+            });
+
+            cond.wait(1000.msecs);
+            assert(result == 2);
+        });
+    });
+}
