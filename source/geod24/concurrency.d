@@ -825,6 +825,9 @@ struct ThreadInfo
     Tid ident;
     Tid owner;
 
+    /// Storage of information required for scheduling, message passing, etc.
+    public Object[string] objects;
+
     /**
      * Gets a thread-local instance of ThreadInfo.
      *
@@ -852,6 +855,34 @@ struct ThreadInfo
         if (owner != Tid.init)
             _send(MsgType.linkDead, owner, ident);
     }
+}
+
+
+/***************************************************************************
+
+    Getter of FiberScheduler assigned to a called thread.
+
+***************************************************************************/
+
+public @property FiberScheduler thisScheduler () nothrow
+{
+    auto p = ("scheduler" in thisInfo.objects);
+    if (p !is null)
+        return cast(FiberScheduler)*p;
+    else
+        return null;
+}
+
+
+/***************************************************************************
+
+    Setter of FiberScheduler assigned to a called thread.
+
+***************************************************************************/
+
+public @property void thisScheduler (FiberScheduler value) nothrow
+{
+    thisInfo.objects["scheduler"] = value;
 }
 
 
