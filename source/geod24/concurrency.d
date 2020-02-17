@@ -1104,9 +1104,12 @@ private:
         while (m_fibers.length > 0)
         {
             auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
-            if (t !is null && !(cast(OwnerTerminated) t))
+            if (t !is null)
             {
-                throw t;
+                if (cast(OwnerTerminated) t)
+                    break;
+                else
+                    throw t;
             }
             if (m_fibers[m_pos].state == Fiber.State.TERM)
             {
