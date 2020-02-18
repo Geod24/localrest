@@ -101,9 +101,6 @@ private struct ArgWrapper (T...)
     T args;
 }
 
-/// Whether this is the main thread
-private bool is_main_thread;
-
 
 /*******************************************************************************
 
