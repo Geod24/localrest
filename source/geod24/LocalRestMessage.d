@@ -12,6 +12,8 @@ import geod24.concurrency;
 import std.format;
 import std.process;
 
+import core.atomic;
+import core.thread;
 import core.time;
 
 public alias MessageChannel = Channel!Message;
@@ -340,6 +342,116 @@ public class MessagePipeline
         return last_idx++;
     }
 }
+
+
+/*******************************************************************************
+
+    This registry allows to look up a `MessagePipeline` based on a `ThreadID`.
+
+*******************************************************************************/
+
+public shared struct MessagePipelineRegistry
+{
+    static shared struct RegistryLock
+    {
+        void lock() { while (!cas(&locked, false, true)) { Thread.yield(); } }
+        void unlock() { atomicStore!(MemoryOrder.rel)(locked, false); }
+        bool locked;
+    }
+    static shared RegistryLock registry_lock;
+
+    private MessagePipeline[string] pipelines;
+
+
+    /***************************************************************************
+
+        Gets the MessageChannel associated with name.
+
+        Params:
+            name = The name to locate within the registry.
+
+        Returns:
+            The associated MessagePipeline or null
+            if name is not registered.
+
+    ***************************************************************************/
+
+    MessagePipeline locate (string name)
+    {
+        registry_lock.lock();
+        scope (exit)
+            registry_lock.unlock();
+
+        if (shared(MessagePipeline)* p = name in this.pipelines)
+            return *cast(MessagePipeline*)p;
+
+        return null;
+    }
+
+
+    /***************************************************************************
+
+        Gets the MessageChannel associated with name.
+
+    ***************************************************************************/
+
+    MessagePipeline locate ()
+    {
+        auto name = format("%x", thisThreadID);
+
+        return this.locate(name);
+    }
+
+
+    /***************************************************************************
+
+        Register message pipeline.
+
+        Params:
+            pipeline = Instanse of MessagePipeline.
+
+    ***************************************************************************/
+
+    bool register (MessagePipeline pipeline)
+    {
+        registry_lock.lock();
+        scope (exit)
+            registry_lock.unlock();
+
+        if (pipeline.name in pipelines)
+            return false;
+        if (pipeline.isClosed)
+            return false;
+
+        this.pipelines[pipeline.name] = cast(shared)pipeline;
+        return true;
+    }
+
+
+    /***************************************************************************
+
+        Removes  message pipeline
+
+        Params:
+            pipeline = Instanse of MessagePipeline
+
+    ***************************************************************************/
+
+    bool unregister (MessagePipeline pipeline)
+    {
+        registry_lock.lock();
+        scope (exit)
+            registry_lock.unlock();
+
+        if (shared(MessagePipeline)* p = pipeline.name in this.pipelines)
+        {
+            this.pipelines.remove(pipeline.name);
+            return true;
+        }
+        return false;
+    }
+}
+
 
 /***************************************************************************
 
