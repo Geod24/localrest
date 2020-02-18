@@ -90,17 +90,6 @@ struct ThreadInfo
         static ThreadInfo val;
         return val;
     }
-
-    /**
-     * Cleans up this ThreadInfo.
-     *
-     * This must be called when a scheduled thread terminates.  It tears down
-     * the messaging system for the thread and notifies interested parties of
-     * the thread's termination.
-     */
-    void cleanup()
-    {
-    }
 }
 
 
