@@ -101,69 +101,6 @@ private struct ArgWrapper (T...)
     T args;
 }
 
-/// Our own little scheduler
-private final class LocalScheduler : FiberScheduler
-{
-    import core.sync.condition;
-    import core.sync.mutex;
-
-    /// Just a FiberCondition with a state
-    private struct Waiting { FiberCondition c; bool busy; }
-
-    /// The 'Response' we are currently processing, if any
-    private Response pending;
-
-    /// Request IDs waiting for a response
-    private Waiting[ulong] waiting;
-
-    /// Should never be called from outside
-    public override Condition newCondition(Mutex m = null) nothrow
-    {
-        assert(0);
-    }
-
-    /// Get the next available request ID
-    public size_t getNextResponseId ()
-    {
-        static size_t last_idx;
-        return last_idx++;
-    }
-
-    public Response waitResponse (size_t id, Duration duration) nothrow
-    {
-        if (id !in this.waiting)
-            this.waiting[id] = Waiting(new FiberCondition, false);
-
-        Waiting* ptr = &this.waiting[id];
-        if (ptr.busy)
-            assert(0, "Trying to override a pending request");
-
-        // We yield and wait for an answer
-        ptr.busy = true;
-
-        if (duration == Duration.init)
-            ptr.c.wait();
-        else if (!ptr.c.wait(duration))
-            this.pending = Response(Status.Timeout, this.pending.id);
-
-        ptr.busy = false;
-        // After control returns to us, `pending` has been filled
-        scope(exit) this.pending = Response.init;
-        return this.pending;
-    }
-
-    /// Called when a waiting condition was handled and can be safely removed
-    public void remove (size_t id)
-    {
-        this.waiting.remove(id);
-    }
-}
-
-
-/// We need a scheduler to simulate an event loop and to be re-entrant
-/// However, the one in `geod24.concurrency` is process-global (`__gshared`)
-private LocalScheduler scheduler;
-
 /// Whether this is the main thread
 private bool is_main_thread;
 
