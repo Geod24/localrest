@@ -133,6 +133,8 @@ public struct Message
     }
 }
 
+/// Handler
+public alias OnCloseHandler = scope void delegate (MessagePipeline pipeline);
 
 /*******************************************************************************
 
@@ -166,6 +168,9 @@ public class MessagePipeline
     /// This value is true if another request is already in progress.
     private bool busy;
 
+    /// Handler when closed
+    private OnCloseHandler onclose;
+
 
     /***********************************************************************
 
@@ -173,12 +178,13 @@ public class MessagePipeline
 
         Params:
             root_chan = Original Channel of Responsor
+            onclose = Handler when closed
 
     ***********************************************************************/
 
-    public this (MessageChannel root_chan)
+    public this (MessageChannel root_chan, OnCloseHandler onclose = null)
     {
-        this (root_chan, new MessageChannel(DefaultQueueSize), new MessageChannel(DefaultQueueSize));
+        this (root_chan, new MessageChannel(DefaultQueueSize), new MessageChannel(DefaultQueueSize), onclose);
     }
 
 
@@ -190,10 +196,11 @@ public class MessagePipeline
             root_chan = Original Channel of Responsor
             producer = Channel of Requestor
             consumer = Channel of Responsor
+            onclose = Handler when closed
 
     ***********************************************************************/
 
-    public this (MessageChannel root_chan, MessageChannel producer, MessageChannel consumer)
+    public this (MessageChannel root_chan, MessageChannel producer, MessageChannel consumer, OnCloseHandler onclose = null)
     {
         this.producer = producer;
         this.consumer = consumer;
@@ -201,6 +208,8 @@ public class MessagePipeline
         this.closed = true;
         this.busy = false;
         this.root_chan = root_chan;
+
+        this.onclose = onclose;
 
         this.name = format("%x", thisThreadID);
     }
@@ -229,6 +238,9 @@ public class MessagePipeline
     {
         this.consumer.send(Message(DestroyPipeCommand()));
         this.closed = true;
+
+        if (this.onclose !is null)
+            this.onclose(this);
     }
 
 

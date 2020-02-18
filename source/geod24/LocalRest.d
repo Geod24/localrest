@@ -340,6 +340,11 @@ public final class RemoteAPI (API) : API
                                 handleCmd(pipeline, pmsg.cmd);
                             else if (!control.drop)
                                 await_msg_pipe ~= AwaitCommand(pipeline, pmsg.cmd);
+                            else
+                            {
+                                pipeline.close();
+                                pipe_terminate = true;
+                            }
                             break;
 
                         case Message.Type.destoy_pipe_command :
@@ -658,7 +663,10 @@ public final class RemoteAPI (API) : API
                             auto pipe = this.registry.locate();
                             if ((pipe is null) || ((pipe !is null) && ((pipe.isBusy) || (pipe.isClosed))))
                             {
-                                pipe = new MessagePipeline(this.childChannel);
+                                pipe = new MessagePipeline(this.childChannel, (p) {
+                                    this.pipeline_collection.remove(p);
+                                    this.registry.unregister(p);
+                                });
                                 pipe.open();
                                 this.registry.register(pipe);
                                 this.pipeline_collection[pipe] = true;
