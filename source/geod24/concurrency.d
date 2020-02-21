@@ -2065,3 +2065,331 @@ unittest
         assert(!chan.tryReceive(&msg));
     });
 }
+
+/// spawn thread
+version (unittest) void spawnThread (void delegate() op)
+{
+    auto t1 = new InfoThread({
+        thisScheduler = new FiberScheduler();
+        op();
+    });
+    t1.start();
+}
+
+/// Parent thread and child thread communicating with 2 channels
+unittest
+{
+    auto channel1 = new Channel!int;
+    auto channel2 = new Channel!int;
+
+    // Thread1
+    spawnThread({
+        int msg = channel1.receive();
+        channel2.send(msg*msg);
+    });
+
+    // Main Thread1
+    channel1.send(2);
+    assert(channel2.receive() == 4);
+}
+
+
+/// Parent thread and fiber of child thread communicating with 2 channels
+unittest
+{
+    auto channel1 = new Channel!int;
+    auto channel2 = new Channel!int;
+
+    // Thread1
+    spawnThread({
+        // Fiber1
+        thisScheduler.start({
+            int msg = channel1.receive();
+            channel2.send(msg*msg);
+        });
+    });
+
+    // Main Thread
+    channel1.send(2);
+    assert(channel2.receive() == 4);
+}
+
+/// Parent thread's fiber and child thread communicating with 2 channels
+unittest
+{
+    auto channel1 = new Channel!int;
+    auto channel2 = new Channel!int;
+    int result;
+
+    // Thread1
+    spawnThread({
+        // Fiber1
+        thisScheduler.start({
+            int msg = channel1.receive();
+            channel2.send(msg*msg);
+        });
+    });
+
+    // Main Thread
+    thisScheduler = new FiberScheduler();
+    thisScheduler.start({
+        channel1.send(2);
+        result = channel2.receive();
+    });
+    assert(result == 4);
+}
+
+/// 2 fibers in a child thread communicating with each other using 2 channels
+unittest
+{
+    auto channel1 = new Channel!int;
+    auto channel2 = new Channel!int;
+    int result;
+
+    Mutex mutex = new Mutex;
+    Condition condition = new Condition(mutex);
+
+    // Thread1
+    spawnThread({
+        scope scheduler = thisScheduler;
+        scheduler.start({
+            //  Fiber1
+            scheduler.spawn({
+                channel2.send(2);
+                result = channel1.receive();
+                synchronized (mutex)
+                {
+                    condition.notify;
+                }
+            });
+            //  Fiber2
+            scheduler.spawn({
+                int msg = channel2.receive();
+                channel1.send(msg*msg);
+            });
+        });
+    });
+
+    synchronized (mutex)
+    {
+        condition.wait(1000.msecs);
+    }
+
+    assert(result == 4);
+}
+
+
+/// Fiber in parent thread communicating with fiber in child thread using 2 channels
+unittest
+{
+    auto channel1 = new Channel!int;
+    auto channel2 = new Channel!int;
+    int result;
+
+    Mutex mutex = new Mutex;
+    Condition condition = new Condition(mutex);
+
+    // Thread1
+    spawnThread({
+        // Fiber1
+        thisScheduler.start({
+            channel2.send(2);
+            result = channel1.receive();
+            synchronized (mutex)
+            {
+                condition.notify;
+            }
+        });
+    });
+
+    // Thread2
+    spawnThread({
+        // Fiber2
+        thisScheduler.start({
+            int msg = channel2.receive();
+            channel1.send(msg*msg);
+        });
+    });
+
+    synchronized (mutex)
+    {
+        condition.wait(1000.msecs);
+    }
+    assert(result == 4);
+}
+
+
+/// Two child threads communicating with each other with 2 channels
+unittest
+{
+    auto channel1 = new Channel!int;
+    auto channel2 = new Channel!int;
+    int result;
+
+    Mutex mutex = new Mutex;
+    Condition condition = new Condition(mutex);
+
+    // Thread1
+    spawnThread({
+        channel2.send(2);
+        result = channel1.receive();
+        synchronized (mutex)
+        {
+            condition.notify;
+        }
+    });
+
+    // Thread2
+    spawnThread({
+        int msg = channel2.receive();
+        channel1.send(msg*msg);
+    });
+
+    synchronized (mutex)
+    {
+        condition.wait(3000.msecs);
+    }
+
+    assert(result == 4);
+}
+
+
+/// One child thread communicating with another child thread's fiber using 2 channels
+unittest
+{
+    auto channel1 = new Channel!int;
+    auto channel2 = new Channel!int;
+    int result;
+
+    Mutex mutex = new Mutex;
+    Condition condition = new Condition(mutex);
+
+    // Thread1
+    spawnThread({
+        channel2.send(2);
+        result = channel1.receive();
+        synchronized (mutex)
+        {
+            condition.notify;
+        }
+    });
+
+    // Thread2
+    spawnThread({
+        // Fiber1
+        thisScheduler.start({
+            int msg = channel2.receive();
+            channel1.send(msg*msg);
+        });
+    });
+
+    synchronized (mutex)
+    {
+        condition.wait(1000.msecs);
+    }
+    assert(result == 4);
+}
+
+
+// Test blocking behavior on threads when using unbuffered channels
+unittest
+{
+    auto channel1 = new Channel!int(0);
+    auto channel2 = new Channel!int(1);
+    int result = 0;
+
+    Mutex mutex = new Mutex;
+    Condition condition = new Condition(mutex);
+
+    // Thread1 - It'll be blocked.
+    spawnThread({
+        channel1.send(2);
+        result = channel1.receive();
+        synchronized (mutex)
+        {
+            condition.notify;
+        }
+    });
+
+    synchronized (mutex)
+    {
+        condition.wait(1000.msecs);
+    }
+    assert(result == 0);
+
+    // Thread2 - Unblock a thread
+    spawnThread({
+        result = channel1.receive();
+        channel1.send(2);
+    });
+
+    synchronized (mutex)
+    {
+        condition.wait(1000.msecs);
+    }
+    assert(result == 2);
+
+    result = 0;
+    // Thread3 - It'll not be blocked, because queue size is 1
+    spawnThread({
+        channel2.send(2);
+        result = channel2.receive();
+        synchronized (mutex)
+        {
+            condition.notify;
+        }
+    });
+
+    synchronized (mutex)
+    {
+        condition.wait(1000.msecs);
+    }
+    assert(result == 2);
+}
+
+
+// Test blocking behavior on fibers when using unbuffered channels
+unittest
+{
+    auto channel1 = new Channel!int(0);
+    auto channel2 = new Channel!int(1);
+    int result = 0;
+
+    // Thread1
+    spawnThread({
+
+        scope scheduler = thisScheduler;
+        scope cond = scheduler.newCondition(null);
+
+        scheduler.start({
+            //  Fiber1 - It'll be blocked.
+            scheduler.spawn({
+                channel1.send(2);
+                result = channel1.receive();
+                cond.notify();
+            });
+
+            assert(!cond.wait(1000.msecs));
+            assert(result == 0);
+
+            //  Fiber2 - Unblock a fiber
+            scheduler.spawn({
+                result = channel1.receive();
+                channel1.send(2);
+            });
+
+            cond.wait(1000.msecs);
+            assert(result == 2);
+
+            //  Fiber3 - It'll not be blocked, because queue size is 1
+            scheduler.spawn({
+                channel2.send(2);
+                result = channel2.receive();
+                cond.notify();
+            });
+
+            cond.wait(1000.msecs);
+            assert(result == 2);
+        });
+    });
+}
