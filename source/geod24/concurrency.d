@@ -56,10 +56,11 @@ public @property ref ThreadInfo thisInfo() nothrow
  * Thrown on the current thread receives an exit message
  * from another thread.
  */
-class SchedulingTerminated : Exception
+
+public class SchedulingTerminated : Exception
 {
     ///
-    this(string msg = "Scheduling terminated") @safe pure nothrow @nogc
+    public this (string msg = "Scheduling terminated") @safe pure nothrow @nogc
     {
         super(msg);
     }
@@ -72,7 +73,7 @@ class SchedulingTerminated : Exception
  * with each logical thread.  It contains all implementation-level information
  * needed by the internal API.
  */
-struct ThreadInfo
+public struct ThreadInfo
 {
     /// Storage of information required for scheduling, message passing, etc.
     public Object[string] objects;
@@ -84,7 +85,7 @@ struct ThreadInfo
      * default instance when info is requested for a thread not created by the
      * Scheduler.
      */
-    static @property ref thisInfo() nothrow
+    public static @property ref thisInfo () nothrow
     {
         static ThreadInfo val;
         return val;
@@ -141,7 +142,7 @@ public class InfoThread : Thread
 
     ***************************************************************************/
 
-    this (void function() fn, size_t sz = 0) @safe pure nothrow @nogc
+    public this (void function() fn, size_t sz = 0) @safe pure nothrow @nogc
     {
         super(fn, sz);
     }
@@ -170,7 +171,7 @@ public class InfoThread : Thread
  * This is an example scheduler that creates a new Fiber per call to spawn
  * and multiplexes the execution of all fibers within the main thread.
  */
-class FiberScheduler
+public class FiberScheduler
 {
 
     /// Whether start() has been called
@@ -180,7 +181,7 @@ class FiberScheduler
      * This creates a new Fiber for the supplied op and then starts the
      * dispatcher.
      */
-    void start(void delegate() op)
+    public void start (void delegate () op)
     {
         create(op);
         dispatch();
@@ -190,7 +191,7 @@ class FiberScheduler
      * This created a new Fiber for the supplied op and adds it to the
      * dispatch list.
      */
-    void spawn(void delegate() op) nothrow
+    public void spawn (void delegate () op) nothrow
     {
         create(op);
         FiberScheduler.yield();
@@ -200,7 +201,7 @@ class FiberScheduler
      * If the caller is a scheduled Fiber, this yields execution to another
      * scheduled Fiber.
      */
-    static void yield() nothrow
+    public static void yield () nothrow
     {
         // NOTE: It's possible that we should test whether the calling Fiber
         //       is an InfoFiber before yielding, but I think it's reasonable
@@ -221,19 +222,18 @@ class FiberScheduler
      *       If `null`, no `Mutex` will be used and it is assumed that the
      *       `Condition` is only waited on/notified from one `Thread`.
      */
-    Condition newCondition(Mutex m) nothrow
+    public Condition newCondition (Mutex m) nothrow
     {
         return new FiberCondition();
     }
 
-protected:
     /**
      * Creates a new Fiber which calls the given delegate.
      *
      * Params:
      *   op = The delegate the fiber should call
      */
-    void create(void delegate() op) nothrow
+    protected void create (void delegate () op) nothrow
     {
         void wrap()
         {
@@ -246,9 +246,9 @@ protected:
     /**
      * Fiber which embeds a ThreadInfo
      */
-    static class InfoFiber : Fiber
+    public static class InfoFiber : Fiber
     {
-        this(void delegate() op, size_t sz = 16 * 1024 * 1024) nothrow
+        public this (void delegate () op, size_t sz = 16 * 1024 * 1024) nothrow
         {
             super(op, sz);
         }
@@ -256,13 +256,13 @@ protected:
 
     protected class FiberCondition : Condition
     {
-        this() nothrow
+        public this () nothrow
         {
             super(null);
             notified = false;
         }
 
-        override void wait() nothrow
+        public override void wait () nothrow
         {
             scope (exit) notified = false;
 
@@ -270,7 +270,7 @@ protected:
                 FiberScheduler.yield();
         }
 
-        override bool wait(Duration period) nothrow
+        public override bool wait (Duration period) nothrow
         {
             import core.time : MonoTime;
 
@@ -285,13 +285,13 @@ protected:
             return notified;
         }
 
-        override void notify() nothrow
+        public override void notify () nothrow
         {
             notified = true;
             FiberScheduler.yield();
         }
 
-        override void notifyAll() nothrow
+        public override void notifyAll () nothrow
         {
             notified = true;
             FiberScheduler.yield();
@@ -300,8 +300,7 @@ protected:
         private bool notified;
     }
 
-private:
-    void dispatch()
+    private void dispatch ()
     {
         import std.algorithm.mutation : remove;
 
@@ -332,9 +331,8 @@ private:
         }
     }
 
-private:
-    Fiber[] m_fibers;
-    size_t m_pos;
+    private Fiber[] m_fibers;
+    private size_t m_pos;
 }
 
 version (unittest)
