@@ -288,6 +288,18 @@ class TidMissingException : Exception
     mixin basicExceptionCtors;
 }
 
+/**
+ * Thrown on the current thread receives an exit message
+ * from another thread.
+ */
+class SchedulingTerminated : Exception
+{
+    ///
+    this(string msg = "Scheduling terminated") @safe pure nothrow @nogc
+    {
+        super(msg);
+    }
+}
 
 // Thread ID
 
