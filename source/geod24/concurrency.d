@@ -1105,9 +1105,12 @@ private:
         while (m_fibers.length > 0)
         {
             auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
-            if (t !is null && !(cast(OwnerTerminated) t))
+            if (t !is null)
             {
-                throw t;
+                if (cast(SchedulingTerminated) t)
+                    break;
+                else if (!(cast(OwnerTerminated) t))
+                    throw t;
             }
             if (m_fibers[m_pos].state == Fiber.State.TERM)
             {
@@ -1125,6 +1128,162 @@ private:
     Fiber[] m_fibers;
     size_t m_pos;
 }
+
+version (unittest)
+{
+    import std.variant;
+
+    public struct TestMessage
+    {
+        Variant data;
+
+        this (T) (T val)
+        {
+            data = val;
+        }
+
+        @property auto convertsTo (T)()
+        {
+            return is(T == Variant) || data.convertsTo!(T);
+        }
+    }
+
+    public alias ChannelT = Channel!TestMessage;
+
+    // Put it in a TestMessage.
+    public static TestMessage toTestMessage (T) (T data)
+    {
+        return TestMessage(data);
+    }
+}
+
+/// Test for the use `SchedulingTerminated`
+unittest
+{
+    import std.conv;
+
+    // Data sent by the caller
+    struct Request
+    {
+        ChannelT sender;
+        string method;
+        string args;
+    }
+
+    // Data sent by the callee back to the caller
+    struct Response
+    {
+        string data;
+    }
+
+    /// Control command when exiting
+    struct Shutdown
+    {
+        bool throw_except;
+    }
+
+    ChannelT spawnThread (void function (ChannelT chan) op)
+    {
+        auto spawnChannel = new ChannelT(256);
+        void exec()
+        {
+            thisScheduler = new FiberScheduler();
+            op(spawnChannel);
+        }
+
+        auto t = new InfoThread(&exec);
+        t.start();
+
+        return spawnChannel;
+    }
+
+    // Send control command to exit.
+    static void shutdown (ChannelT chan, bool throw_except)
+    {
+        chan.send(toTestMessage(Shutdown(throw_except)));
+    }
+
+    // Handle requests.
+    static void sub_task (Request req)
+    {
+        auto scheduler = thisScheduler;
+        scheduler.spawn({
+            if (req.method == "pow")
+            {
+                immutable int value = to!int(req.args);
+                auto msg_res = toTestMessage(Response(to!string(value * value)));
+                req.sender.send(msg_res);
+            }
+            else if (req.method == "loop")
+            {
+                immutable int value = to!int(req.args);
+                auto condition = scheduler.newCondition(null);
+                condition.wait(seconds(value));
+                auto msg_res = toTestMessage(Response(""));
+                req.sender.send(msg_res);
+            }
+            else
+            {
+                assert(0, "Unmatched method name: " ~ req.method);
+            }
+        });
+    }
+
+    // This is a function to running on a thread.
+    static void main_task (ChannelT self)
+    {
+        auto scheduler = thisScheduler;
+        auto channel = self;
+        bool terminate = false;
+
+        scheduler.start({
+            while (!terminate)
+            {
+                TestMessage msg = channel.receive();
+
+                // On received a `Request`
+                if (msg.convertsTo!(Request))
+                {
+                    auto req = msg.data.peek!(Request);
+                    sub_task(*req);
+                }
+                // On received a `Shutdown`
+                else if (msg.convertsTo!(Shutdown))
+                {
+                    terminate = true;
+                    auto value = msg.data.peek!(Shutdown);
+                    if (value.throw_except)
+                    {
+                        throw new SchedulingTerminated();
+                    }
+                }
+                else
+                {
+                    assert(0, "Unexpected type");
+                }
+            }
+        });
+    }
+
+    auto server = spawnThread(&main_task);
+    auto client = new ChannelT(256);
+
+    server.send(toTestMessage(Request(client, "pow", "2")));
+
+    auto res_msg = client.receive();
+    auto res = res_msg.data.peek!(Response);
+    assert(res.data == "4");
+
+    server.send(toTestMessage(Request(client, "loop", "5")));
+
+    // All tasks are terminated immediately.
+    shutdown(server, true);
+
+    // After the test have been completed,
+    // the main thread will not be terminated immediately.
+    version(none) shutdown(server, false);
+}
+
 
 /*
  * A MessageBox is a message queue for one thread.  Other threads may send
