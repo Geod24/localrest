@@ -226,28 +226,6 @@ class FiberScheduler
     }
 
     /**
-     * Returns an appropriate ThreadInfo instance.
-     *
-     * Returns a ThreadInfo instance specific to the calling Fiber if the
-     * Fiber was created by this dispatcher, otherwise it returns
-     * ThreadInfo.thisInfo.
-     */
-    @property ref ThreadInfo thisInfo() nothrow
-    {
-        auto f = cast(InfoFiber) Fiber.getThis();
-
-        if (f !is null)
-            return f.info;
-
-        auto t = cast(InfoThread)Thread.getThis();
-
-        if (t !is null)
-            return t.info;
-
-        return ThreadInfo.thisInfo;
-    }
-
-    /**
      * Returns a Condition analog that yields when wait or notify is called.
      *
      * Bug:
