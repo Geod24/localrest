@@ -253,10 +253,6 @@ protected:
     {
         void wrap()
         {
-            scope (exit)
-            {
-                thisInfo.cleanup();
-            }
             op();
         }
 
@@ -268,8 +264,6 @@ protected:
      */
     static class InfoFiber : Fiber
     {
-        ThreadInfo info;
-
         this(void delegate() op, size_t sz = 16 * 1024 * 1024) nothrow
         {
             super(op, sz);
