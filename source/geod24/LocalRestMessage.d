@@ -17,8 +17,8 @@ public immutable size_t DefaultQueueSize = 1024;
 /// Data sent by the caller
 public struct Command
 {
-    /// Tid of the sender thread
-    Tid sender;
+    /// MessageChannel of the sender thread
+    MessageChannel sender;
     /// In order to support re-entrancy, every request contains an id
     /// which should be copied in the `Response`
     /// Initialized to `size_t.max` so not setting it crashes the program
