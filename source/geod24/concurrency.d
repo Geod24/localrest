@@ -837,7 +837,8 @@ struct ThreadInfo
     Tid ident;
     Tid owner;
 
-    public FiberScheduler scheduler;
+    /// Storage of information required for scheduling, message passing, etc.
+    public Object[string] objects;
 
     /**
      * Gets a thread-local instance of ThreadInfo.
@@ -877,7 +878,11 @@ struct ThreadInfo
 
 public @property FiberScheduler thisScheduler () nothrow
 {
-    return thisInfo.scheduler;
+    auto p = ("scheduler" in thisInfo.objects);
+    if (p !is null)
+        return cast(FiberScheduler)*p;
+    else
+        return null;
 }
 
 
@@ -889,7 +894,7 @@ public @property FiberScheduler thisScheduler () nothrow
 
 public @property void thisScheduler (FiberScheduler value) nothrow
 {
-    thisInfo.scheduler = value;
+    thisInfo.objects["scheduler"] = value;
 }
 
 
