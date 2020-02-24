@@ -342,7 +342,7 @@ public final class RemoteAPI (API) : API
                                 await_msg_pipe ~= AwaitCommand(pipeline, pmsg.cmd);
                             else
                             {
-                                pipeline.close();
+                                pipeline.isDroped = true;
                                 pipe_terminate = true;
                             }
                             break;

@@ -167,6 +167,8 @@ public class MessagePipeline
     /// This value is true if another request is already in progress.
     private bool busy;
 
+    private bool droped;
+
     /// lock for status
     private Mutex mutex;
 
@@ -213,6 +215,7 @@ public class MessagePipeline
 
         this.closed = true;
         this.busy = false;
+        this.droped  = false;
         this.root_chan = root_chan;
 
         this.last_request_id = 0;
@@ -299,6 +302,19 @@ public class MessagePipeline
                 auto left = limit - MonoTime.currTime;
                 if (left.isNegative)
                     return Message(Response(Status.Timeout, req.cmd.id));
+                if (this.isDroped)
+                {
+                    this.isDroped = false;
+                    return Message(Response(Status.Timeout, req.cmd.id));
+                }
+            }
+            else
+            {
+                if (this.isDroped)
+                {
+                    this.isDroped = false;
+                    Message(Response(Status.Success, req.cmd.id));
+                }
             }
 
             thisScheduler.yield();
@@ -399,6 +415,43 @@ public class MessagePipeline
         this.busy = value;
     }
 
+
+    /***************************************************************************
+
+        Return droped status.
+
+        Returns:
+            true if the request is droped, otherwise false.
+
+    ***************************************************************************/
+
+    public @property bool isDroped ()
+    {
+        this.mutex.lock();
+        scope (exit)
+            this.mutex.unlock();
+
+        return this.droped;
+    }
+
+
+    /***************************************************************************
+
+        Set droped status.
+
+        Params:
+            value = true if the request is droped, otherwise false.
+
+    ***************************************************************************/
+
+    public @property void isDroped (bool value)
+    {
+        this.mutex.lock();
+        scope (exit)
+            this.mutex.unlock();
+
+        this.droped = value;
+    }
 
     /***************************************************************************
 
