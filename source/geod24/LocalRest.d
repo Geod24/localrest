@@ -769,7 +769,6 @@ private
         auto channel = new MessageChannel(DefaultQueueSize);
         void exec () {
             thisScheduler = new FiberScheduler();
-            thisMessageChannel = channel;
             fn(channel, args);
         }
 

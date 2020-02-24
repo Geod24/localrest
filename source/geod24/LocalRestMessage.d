@@ -540,37 +540,3 @@ public shared struct MessagePipelineRegistry
         return false;
     }
 }
-
-
-/***************************************************************************
-
-    Getter of MessageChannel assigned to a called thread.
-
-    Returns:
-        Returns instance of `MessageChannel` that is created by top thread.
-
-***************************************************************************/
-
-public @property MessageChannel thisMessageChannel () nothrow
-{
-    auto p = "messagechannel" in thisInfo.objects;
-    if (p !is null)
-        return cast(MessageChannel)*p;
-    else
-        return null;
-}
-
-
-/***************************************************************************
-
-    Setter of MessageChannel assigned to a called thread.
-
-    Params:
-        value = The instance of `MessageChannel`.
-
-***************************************************************************/
-
-public @property void thisMessageChannel (MessageChannel value) nothrow
-{
-    thisInfo.objects["messagechannel"] = value;
-}
