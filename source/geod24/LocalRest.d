@@ -210,7 +210,7 @@ public final class RemoteAPI (API) : API
 
     ***************************************************************************/
 
-    private static void handleCommand (Command cmd, API node, FilterAPI filter)
+    private static void handleCommand (MessagePipeline pipeline, Command cmd, API node, FilterAPI filter)
     {
         import std.format;
 
@@ -228,7 +228,7 @@ public final class RemoteAPI (API) : API
                         {
                             // we have to send back a message
                             import std.format;
-                            cmd.sender.send(Message(Response(Status.Failed, cmd.id,
+                            pipeline.reply(Message(Response(Status.Failed, cmd.id,
                                 format("Filtered method '%%s'", filter.pretty_func))));
                             return;
                         }
@@ -237,7 +237,7 @@ public final class RemoteAPI (API) : API
 
                         static if (!is(ReturnType!ovrld == void))
                         {
-                            cmd.sender.send(
+                            pipeline.reply(
                                 Message(Response(
                                     Status.Success,
                                     cmd.id,
@@ -248,13 +248,13 @@ public final class RemoteAPI (API) : API
                         else
                         {
                             node.%1$s(args.args);
-                            cmd.sender.send(Message(Response(Status.Success, cmd.id)));
+                            pipeline.reply(Message(Response(Status.Success, cmd.id)));
                         }
                     }
                     catch (Throwable t)
                     {
                         // Our sender expects a response
-                        cmd.sender.send(Message(Response(Status.Failed, cmd.id, t.toString())));
+                        pipeline.reply(Message(Response(Status.Failed, cmd.id, t.toString())));
                     }
 
                     return;
@@ -296,37 +296,33 @@ public final class RemoteAPI (API) : API
         }
 
         auto node = new Implementation(cargs);
-        auto wmanager = new WaitingManager();
         scope channel = self;
         scope scheduler = thisScheduler;
 
-        thisWaitingManager = wmanager;
-        thisNodeThread = true;
+        struct AwaitCommand
+        {
+            MessagePipeline pipeline;
+            Command cmd;
+        }
+
         Control control;
-        Message[] await_msg;
+        AwaitCommand[] await_msg;
         bool terminate = false;
 
+        bool isSleeping ()
+        {
+            return control.sleep_until != SysTime.init
+                && Clock.currTime < control.sleep_until;
+        }
+
+        void handleCmd (MessagePipeline pipeline, Command cmd)
+        {
+            scheduler.spawn({
+                handleCommand(pipeline, cmd, node, control.filter);
+            });
+        }
+
         scheduler.start({
-
-            bool isSleeping ()
-            {
-                return control.sleep_until != SysTime.init
-                    && Clock.currTime < control.sleep_until;
-            }
-
-            void handleCmd (Command cmd)
-            {
-                scheduler.spawn({
-                    handleCommand(cmd, node, control.filter);
-                });
-            }
-
-            void handleRes (Response res)
-            {
-                wmanager.pending = res;
-                wmanager.waiting[res.id].c.notify();
-                wmanager.remove(res.id);
-            }
 
             while (!terminate)
             {
@@ -335,27 +331,6 @@ public final class RemoteAPI (API) : API
                 {
                     switch (msg.tag)
                     {
-                        case Message.Type.command :
-                            if (!isSleeping())
-                                handleCmd(msg.cmd);
-                            else if (!control.drop)
-                                await_msg ~= Message(msg.cmd);
-                            break;
-
-                        case Message.Type.response :
-                            auto c = scheduler.newCondition(null);
-                            foreach (_; 0..10)
-                            {
-                                if (wmanager.exist(msg.res.id))
-                                    break;
-                                c.wait(10.msecs);
-                            }
-                            if (!isSleeping())
-                                handleRes(msg.res);
-                            else if (!control.drop)
-                                await_msg ~= Message(msg.res);
-                            break;
-
                         case Message.Type.filter :
                             control.filter = msg.filter;
                             break;
@@ -363,6 +338,37 @@ public final class RemoteAPI (API) : API
                         case Message.Type.time_command :
                             control.sleep_until = Clock.currTime + msg.time.dur;
                             control.drop = msg.time.drop;
+                            break;
+
+                        case Message.Type.create_pipe_command :
+                            scheduler.spawn({
+                                scope pipeline = msg.create_pipe.pipeline;
+                                scope pipe_terminate = false;
+                                while (!terminate && !pipe_terminate)
+                                {
+                                    Message pmsg;
+                                    if (pipeline.consumer.tryReceive(&pmsg))
+                                    {
+                                        switch (pmsg.tag)
+                                        {
+                                            case Message.Type.command :
+                                                if (!isSleeping())
+                                                    handleCmd(pipeline, pmsg.cmd);
+                                                else if (!control.drop)
+                                                    await_msg ~= AwaitCommand(pipeline, pmsg.cmd);
+                                                break;
+
+                                            case Message.Type.destoy_pipe_command :
+                                                pipe_terminate = true;
+                                                break;
+
+                                            default :
+                                                assert(0, "Unexpected type: " ~ pmsg.tag);
+                                        }
+                                    }
+                                    scheduler.yield();
+                                }
+                            });
                             break;
 
                         case Message.Type.shutdown_command :
@@ -380,14 +386,7 @@ public final class RemoteAPI (API) : API
                 {
                     if (await_msg.length > 0)
                     {
-                        await_msg.each!(
-                            (msg) {
-                                if (msg.tag == Message.Type.command)
-                                    handleCmd(msg.cmd);
-                                if (msg.tag == Message.Type.response)
-                                    handleRes(msg.res);
-                            }
-                        );
+                        await_msg.each!((msg) => handleCmd(msg.pipeline, msg.cmd));
                         await_msg.length = 0;
                         assumeSafeAppend(await_msg);
                     }
@@ -617,95 +616,38 @@ public final class RemoteAPI (API) : API
                         auto serialized = ArgWrapper!(Parameters!ovrld)(params)
                             .serializeToJsonString();
 
-                        Command command;
                         Response res;
 
-                        // from Node to Node
-                        if (thisNodeThread)
+                        void doWork ()
                         {
-                            auto wmanager = thisWaitingManager;
-                            if (wmanager is null)
-                            {
-                                wmanager = new WaitingManager();
-                                thisWaitingManager = wmanager;
-                            }
+                            auto pipe = new MessagePipeline(this.childChannel);
+                            pipe.open();
 
-                            auto channel = thisMessageChannel;
-                            if (channel is null)
-                            {
-                                channel = new MessageChannel();
-                                thisMessageChannel = channel;
-                            }
+                            auto msg_req = Message(Command(this.childChannel, pipe.getId(), ovrld.mangleof, serialized));
+                            auto msg_res = pipe.query(msg_req, this.timeout);
 
-                            command = Command(channel, wmanager.getNextResponseId(), ovrld.mangleof, serialized);
-                            this.childChannel.send(Message(command));
+                            if (msg_res.tag == Message.Type.response)
+                                res = msg_res.res;
+                            else
+                                assert(0, "Not expected message type");
 
-                            res = wmanager.waitResponse(command.id, this.timeout);
+                            if (res.status == Status.Success)
+                                pipe.close();
                         }
 
-                        // from Non-Node to Node
+                        auto scheduler = thisScheduler;
+                        if (scheduler is null)
+                        {
+                            scheduler = new FiberScheduler();
+                            thisScheduler = scheduler;
+                            scheduler.start(&doWork);
+                        }
                         else
                         {
-                            auto scheduler = thisScheduler;
-                            if (scheduler is null)
-                            {
-                                scheduler = new FiberScheduler();
-                                thisScheduler = scheduler;
-                            }
-
-                            auto wmanager = thisWaitingManager;
-                            if (wmanager is null)
-                            {
-                                wmanager = new WaitingManager();
-                                thisWaitingManager = wmanager;
-                            }
-
-                            auto channel = thisMessageChannel;
-                            if (channel is null)
-                            {
-                                channel = new MessageChannel();
-                                thisMessageChannel = channel;
-                            }
-
-                            bool terminated = false;
-                            command = Command(channel, wmanager.getNextResponseId(), ovrld.mangleof, serialized);
-
-                            scheduler.spawn({
-                                this.childChannel.send(Message(command));
-                            });
-
-                            scheduler.spawn({
-                                Message msg;
-                                while (!terminated)
-                                {
-                                    if (channel.tryReceive(&msg))
-                                    {
-                                        scope c = scheduler.newCondition(null);
-                                        foreach (_; 0..10)
-                                        {
-                                            if (wmanager.exist(msg.res.id))
-                                                break;
-                                            c.wait(1.msecs);
-                                        }
-
-                                        if (wmanager.exist(msg.res.id))
-                                        {
-                                            wmanager.pending = msg.res;
-                                            wmanager.waiting[msg.res.id].c.notify();
-                                            wmanager.remove(res.id);
-                                        }
-
-                                        if (msg.res.id == command.id)
-                                            break;
-                                    }
-                                    scheduler.yield();
-                                }
-                            });
-
-                            scheduler.start({
-                                res = wmanager.waitResponse(command.id, this.timeout);
-                                terminated = true;
-                            });
+                            if (Fiber.getThis())
+                                doWork();
+                            else
+                                scheduler.start(&doWork);
                         }
                         return res;
                     } ();
