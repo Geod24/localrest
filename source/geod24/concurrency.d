@@ -85,8 +85,7 @@ public class SchedulingTerminated : Exception
 
 public struct ThreadInfo
 {
-    /// Storage of information required for scheduling, message passing, etc.
-    public Object[string] objects;
+    public FiberScheduler scheduler;
 
 
     /***************************************************************************
@@ -115,11 +114,7 @@ public struct ThreadInfo
 
 public @property FiberScheduler thisScheduler () nothrow
 {
-    auto p = ("scheduler" in thisInfo.objects);
-    if (p !is null)
-        return cast(FiberScheduler)*p;
-    else
-        return null;
+    return thisInfo.scheduler;
 }
 
 
@@ -131,7 +126,7 @@ public @property FiberScheduler thisScheduler () nothrow
 
 public @property void thisScheduler (FiberScheduler value) nothrow
 {
-    thisInfo.objects["scheduler"] = value;
+    thisInfo.scheduler = value;
 }
 
 
