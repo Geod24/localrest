@@ -420,6 +420,9 @@ public final class RemoteAPI (API) : API
     /// Timeout to use when issuing requests
     private const Duration timeout;
 
+    /// Storage of Message Pipeline, Save what has already been created.
+    private MessagePipelineRegistry registry;
+
     // Vibe.d mandates that method must be @safe
     @safe:
 
@@ -634,19 +637,27 @@ public final class RemoteAPI (API) : API
 
                         void doWork ()
                         {
-                            auto pipe = new MessagePipeline(this.childChannel);
-                            pipe.open();
+                            auto pipe = this.registry.locate();
+
+                            // If there is no registered message pipeline, or if there is already processing the request.
+                            if ((pipe is null) || ((pipe !is null) && (pipe.isBusy)))
+                            {
+                                pipe = new MessagePipeline(this.childChannel);
+                                pipe.open();
+                                this.registry.register(pipe);
+                            }
 
                             auto msg_req = Message(Command(pipe.getId(), ovrld.mangleof, serialized));
                             auto msg_res = pipe.query(msg_req, this.timeout);
+
+                            // If another pipeline has already been activated then close then this pipeline.
+                            if (pipe != this.registry.locate())
+                                pipe.close();
 
                             if (msg_res.tag == Message.Type.response)
                                 res = msg_res.res;
                             else
                                 assert(0, "Not expected message type");
-
-                            if (res.status == Status.Success)
-                                pipe.close();
                         }
 
                         auto scheduler = thisScheduler;
