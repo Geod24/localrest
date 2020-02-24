@@ -134,6 +134,8 @@ public struct Message
     }
 }
 
+/// Handler
+public alias OnCloseHandler = scope void delegate (MessagePipeline pipeline);
 
 /*******************************************************************************
 
@@ -171,6 +173,9 @@ public class MessagePipeline
     /// The next available request ID.
     private size_t last_request_id;
 
+    /// Handler when closed
+    private OnCloseHandler onclose;
+
 
     /***********************************************************************
 
@@ -178,12 +183,13 @@ public class MessagePipeline
 
         Params:
             root_chan = Original Channel of Responsor
+            onclose = Handler when closed
 
     ***********************************************************************/
 
-    public this (MessageChannel root_chan)
+    public this (MessageChannel root_chan, OnCloseHandler onclose = null)
     {
-        this (root_chan, new MessageChannel(DefaultQueueSize), new MessageChannel(DefaultQueueSize));
+        this (root_chan, new MessageChannel(DefaultQueueSize), new MessageChannel(DefaultQueueSize), onclose);
     }
 
 
@@ -195,10 +201,11 @@ public class MessagePipeline
             root_chan = Original Channel of Responsor
             producer = Channel of Requestor
             consumer = Channel of Responsor
+            onclose = Handler when closed
 
     ***********************************************************************/
 
-    public this (MessageChannel root_chan, MessageChannel producer, MessageChannel consumer)
+    public this (MessageChannel root_chan, MessageChannel producer, MessageChannel consumer, OnCloseHandler onclose = null)
     {
         this.mutex = new Mutex;
         this.producer = producer;
@@ -209,6 +216,8 @@ public class MessagePipeline
         this.root_chan = root_chan;
 
         this.last_request_id = 0;
+
+        this.onclose = onclose;
 
         this.name = format("%x", thisThreadID);
     }
@@ -242,7 +251,11 @@ public class MessagePipeline
             return;
 
         this.consumer.send(Message(DestroyPipeCommand()));
+
         this.isClosed = true;
+
+        if (this.onclose !is null)
+            this.onclose(this);
     }
 
 
