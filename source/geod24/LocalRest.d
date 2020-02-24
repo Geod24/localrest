@@ -322,8 +322,59 @@ public final class RemoteAPI (API) : API
             });
         }
 
-        scheduler.start({
+        void pipelineTask (MessagePipeline pipeline)
+        {
+            bool pipe_terminate = false;
+            AwaitCommand[] await_msg_pipe;
 
+            while (!terminate && !pipe_terminate)
+            {
+                Message pmsg;
+                if (pipeline.consumer.tryReceive(&pmsg))
+                {
+                    switch (pmsg.tag)
+                    {
+                        case Message.Type.command :
+                            if (!isSleeping())
+                                handleCmd(pipeline, pmsg.cmd);
+                            else if (!control.drop)
+                                await_msg_pipe ~= AwaitCommand(pipeline, pmsg.cmd);
+                            break;
+
+                        case Message.Type.destoy_pipe_command :
+                            pipe_terminate = true;
+                            break;
+
+                        case Message.Type.filter :
+                            control.filter = pmsg.filter;
+                            break;
+
+                        case Message.Type.time_command :
+                            control.sleep_until = Clock.currTime + pmsg.time.dur;
+                            control.drop = pmsg.time.drop;
+                            break;
+
+                        default :
+                            assert(0, "Unexpected type: " ~ pmsg.tag);
+                    }
+                }
+                scheduler.yield();
+
+                if (!isSleeping())
+                {
+                    if (await_msg_pipe.length > 0)
+                    {
+                        await_msg_pipe.each!((msg) => handleCmd(msg.pipeline, msg.cmd));
+                        await_msg_pipe.length = 0;
+                        assumeSafeAppend(await_msg_pipe);
+                    }
+                }
+
+                scheduler.yield();
+            }
+        }
+
+        scheduler.start({
             while (!terminate)
             {
                 Message msg;
@@ -331,6 +382,12 @@ public final class RemoteAPI (API) : API
                 {
                     switch (msg.tag)
                     {
+                        case Message.Type.create_pipe_command :
+                            scheduler.spawn({
+                                pipelineTask(msg.create_pipe.pipeline);
+                            });
+                            break;
+
                         case Message.Type.filter :
                             control.filter = msg.filter;
                             break;
@@ -340,55 +397,12 @@ public final class RemoteAPI (API) : API
                             control.drop = msg.time.drop;
                             break;
 
-                        case Message.Type.create_pipe_command :
-                            scheduler.spawn({
-                                scope pipeline = msg.create_pipe.pipeline;
-                                scope pipe_terminate = false;
-                                while (!terminate && !pipe_terminate)
-                                {
-                                    Message pmsg;
-                                    if (pipeline.consumer.tryReceive(&pmsg))
-                                    {
-                                        switch (pmsg.tag)
-                                        {
-                                            case Message.Type.command :
-                                                if (!isSleeping())
-                                                    handleCmd(pipeline, pmsg.cmd);
-                                                else if (!control.drop)
-                                                    await_msg ~= AwaitCommand(pipeline, pmsg.cmd);
-                                                break;
-
-                                            case Message.Type.destoy_pipe_command :
-                                                pipe_terminate = true;
-                                                break;
-
-                                            default :
-                                                assert(0, "Unexpected type: " ~ pmsg.tag);
-                                        }
-                                    }
-                                    scheduler.yield();
-                                }
-                            });
-                            break;
-
                         case Message.Type.shutdown_command :
                             terminate = true;
                             throw new SchedulingTerminated();
 
                         default :
                             assert(0, "Unexpected type: " ~ msg.tag);
-                    }
-                }
-
-                scheduler.yield();
-
-                if (!isSleeping())
-                {
-                    if (await_msg.length > 0)
-                    {
-                        await_msg.each!((msg) => handleCmd(msg.pipeline, msg.cmd));
-                        await_msg.length = 0;
-                        assumeSafeAppend(await_msg);
                     }
                 }
 
