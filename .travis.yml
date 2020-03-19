@@ -29,6 +29,8 @@ matrix:
             - gdc-9
       env: DC=gdc
 
+# TODO: Make `vibe-d:data` optional, and fetch it here for testing
+# Currently dub complains even after running `dub fetch vibe-d:data`.
 script:
  - dub test -b unittest-cov --compiler=${DC}
 after_success:

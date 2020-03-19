@@ -69,6 +69,10 @@
     the only dependency to Vibe.d is actually to it's JSON module,
     as Vibe.d is the only available JSON module known to the author
     to provide an interface to deserialize composite types.
+    This dependency is however not enforced by the dub project file,
+    as users can provide their own serializer (see `geod24.Serialization`).
+    If the default parameter for serialization is never used,
+    one's project need not depend on `vibe-d:data`.
 
     Author:         Mathias 'Geod24' Lang
     License:        MIT (See LICENSE.txt)
@@ -78,9 +82,8 @@
 
 module geod24.LocalRest;
 
-import vibe.data.json;
-
 static import C = geod24.concurrency;
+import geod24.Serialization;
 import std.meta : AliasSeq;
 import std.traits : Parameters, ReturnType;
 
@@ -99,8 +102,8 @@ private struct Command
     size_t id = size_t.max;
     /// Method to call
     string method;
-    /// Arguments to the method, JSON formatted
-    string args;
+    /// Serialized arguments to the method
+    SerializedData args;
 }
 
 /// Ask the node to exhibit a certain behavior for a given time
@@ -150,9 +153,9 @@ private struct Response
     /// properly dispatch this event
     /// Initialized to `size_t.max` so not setting it crashes the program
     size_t id;
-    /// If `status == Status.Success`, the JSON-serialized return value.
+    /// If `status == Status.Success`, the serialized return value.
     /// Otherwise, it contains `Exception.toString()`.
-    string data;
+    SerializedData data;
 }
 
 /// Simple wrapper to deal with tuples
@@ -273,13 +276,23 @@ public void sleep (Duration timeout)
     In order to instantiate a new server (in a remote thread), use the static
     `spawn` function.
 
+    Serialization:
+      In order to support custom serialization policy, one can change the
+      `Serializer` parameter. This parameter is expected to be either a
+      template or an aggregate with two static methods, but no explicit
+      limitation is put on the type.
+      See `geod24.Serialization`'s documentation for more informations.
+
     Params:
       API = The interface defining the API to implement
+      Serializer = An aggregate which follows the requirement explained above.
 
 *******************************************************************************/
 
-public final class RemoteAPI (API) : API
+public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 {
+    static assert (!serializerInvalidReason!(S).length, serializerInvalidReason!S);
+
     /***************************************************************************
 
         Instantiate a node and start it
@@ -304,7 +317,7 @@ public final class RemoteAPI (API) : API
 
     ***************************************************************************/
 
-    public static RemoteAPI!(API) spawn (Impl) (CtorParams!Impl args,
+    public static RemoteAPI spawn (Impl) (CtorParams!Impl args,
         Duration timeout = Duration.init)
     {
         auto childTid = C.spawn(&spawned!(Impl), args);
@@ -353,11 +366,12 @@ public final class RemoteAPI (API) : API
                             // we have to send back a message
                             import std.format;
                             C.send(cmd.sender, Response(Status.Failed, cmd.id,
-                                format("Filtered method '%%s'", filter.pretty_func)));
+                                SerializedData(format("Filtered method '%%s'", filter.pretty_func))));
                             return;
                         }
 
-                        auto args = cmd.args.deserializeJson!(ArgWrapper!(Parameters!ovrld));
+                        auto args = S.deserialize!(ArgWrapper!(Parameters!ovrld))(
+                            cmd.args.getS!S);
 
                         static if (!is(ReturnType!ovrld == void))
                         {
@@ -365,7 +379,7 @@ public final class RemoteAPI (API) : API
                                 Response(
                                     Status.Success,
                                     cmd.id,
-                                    node.%1$s(args.args).serializeToJsonString()));
+                                    SerializedData(S.serialize(node.%1$s(args.args)))));
                         }
                         else
                         {
@@ -376,7 +390,8 @@ public final class RemoteAPI (API) : API
                     catch (Throwable t)
                     {
                         // Our sender expects a response
-                        C.send(cmd.sender, Response(Status.Failed, cmd.id, t.toString()));
+                        C.send(cmd.sender,
+                               Response(Status.Failed, cmd.id, SerializedData(t.toString())));
                     }
 
                     return;
@@ -712,10 +727,10 @@ public final class RemoteAPI (API) : API
                     // `geod24.concurrency.send/receive[Only]` is not `@safe` but
                     // this overload needs to be
                     auto res = () @trusted {
-                        auto serialized = ArgWrapper!(Parameters!ovrld)(params)
-                            .serializeToJsonString();
+                        auto serialized = S.serialize(ArgWrapper!(Parameters!ovrld)(params));
 
-                        auto command = Command(C.thisTid(), scheduler.getNextResponseId(), ovrld.mangleof, serialized);
+                        auto command = Command(C.thisTid(), scheduler.getNextResponseId(), ovrld.mangleof,
+                                               SerializedData(serialized));
                         C.send(this.childTid, command);
 
                         // for the main thread, we run the "event loop" until
@@ -750,13 +765,13 @@ public final class RemoteAPI (API) : API
                     }();
 
                     if (res.status == Status.Failed)
-                        throw new Exception(res.data);
+                        throw new Exception(res.data.get!string);
 
                     if (res.status == Status.Timeout)
                         throw new Exception("Request timed-out");
 
                     static if (!is(ReturnType!(ovrld) == void))
-                        return res.data.deserializeJson!(typeof(return));
+                        return S.deserialize!(typeof(return))(res.data.getS!S());
                 }
                 });
         }
@@ -1616,4 +1631,60 @@ unittest
     node_2.ctrl.shutdown();  // shut it down before wake-up, segfault() command will be ignored
     node_1.ctrl.shutdown();
     thread_joinAll();
+}
+
+/// Example of a custom (de)serialization policy
+unittest
+{
+    static struct Serialize
+    {
+    static:
+        public immutable(ubyte[]) serialize (T) (auto ref T value) @trusted
+        {
+            static assert(is(typeof({ T v = immutable(T).init; })));
+            static if (is(T : const(ubyte)[]))
+                return value.idup;
+            else
+                return (cast(ubyte*)&value)[0 .. T.sizeof].idup;
+        }
+
+        public QT deserialize (QT) (immutable(ubyte)[] data) @trusted
+        {
+            return *cast(QT*)(data.dup.ptr);
+        }
+    }
+
+    static struct ValueType
+    {
+        ulong v1;
+        uint v2;
+        uint v3;
+    }
+
+    static interface API
+    {
+        @safe:
+        public @property ulong pubkey ();
+        public ValueType getValue (string val);
+        // Note: Vibe.d's JSON serializer cannot serialize this
+        public immutable(ubyte[32]) getHash (const ubyte[] val);
+    }
+
+    static class MockAPI : API
+    {
+        @safe:
+        public override @property ulong pubkey () { return 42; }
+        public override ValueType getValue (string val) { return ValueType(val.length, 2, 3); }
+        public override immutable(ubyte[32]) getHash (const ubyte[] val)
+        {
+            return val.length >= 32 ? val[0 .. 32] : typeof(return).init;
+        }
+    }
+
+    scope test = RemoteAPI!(API, Serialize).spawn!MockAPI();
+    assert(test.pubkey() == 42);
+    assert(test.getValue("Hello world") == ValueType(11, 2, 3));
+    ubyte[64] val = 42;
+    assert(test.getHash(val) == val[0 .. 32]);
+    test.ctrl.shutdown();
 }
