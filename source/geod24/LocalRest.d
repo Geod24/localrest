@@ -78,6 +78,8 @@
 
 module geod24.LocalRest;
 
+import geod24.Exception;
+
 import vibe.data.json;
 
 static import C = geod24.concurrency;
@@ -386,7 +388,8 @@ public final class RemoteAPI (API) : API
                 }.format(member, ovrld.mangleof));
             }
         default:
-            assert(0, "Unmatched method name: " ~ cmd.method);
+            throw new UnhandledMethodException(cmd.method);
+            //assert(0, "Unmatched method name: " ~ cmd.method);
         }
     }
 
