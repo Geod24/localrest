@@ -755,7 +755,7 @@ public final class RemoteAPI (API) : API
                         throw new Exception(res.data);
 
                     if (res.status == Status.Timeout)
-                        throw new Exception(serializeToJsonString("Request timed-out"));
+                        throw new Exception("Request timed-out");
 
                     static if (!is(ReturnType!(ovrld) == void))
                         return res.data.deserializeJson!(typeof(return));
@@ -1574,7 +1574,7 @@ unittest
     }
     catch (Exception ex)
     {
-        assert(ex.msg == `"Request timed-out"`);
+        assert(ex.msg == "Request timed-out");
     }
 }
 
