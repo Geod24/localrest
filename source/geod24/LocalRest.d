@@ -771,9 +771,9 @@ unittest
     {
         @safe:
         public @property ulong pubkey ();
-        public Json getValue (ulong idx);
-        public Json getQuorumSet ();
-        public string recv (Json data);
+        public string getValue (ulong idx);
+        public ubyte[32] getQuorumSet ();
+        public string recv (string data);
     }
 
     static class MockAPI : API
@@ -781,11 +781,11 @@ unittest
         @safe:
         public override @property ulong pubkey ()
         { return 42; }
-        public override Json getValue (ulong idx)
+        public override string getValue (ulong idx)
         { assert(0); }
-        public override Json getQuorumSet ()
+        public override ubyte[32] getQuorumSet ()
         { assert(0); }
-        public override string recv (Json data)
+        public override string recv (string data)
         { assert(0); }
     }
 
@@ -808,9 +808,9 @@ unittest
     {
         @safe:
         public @property ulong pubkey ();
-        public Json getValue (ulong idx);
-        public string recv (Json data);
-        public string recv (ulong index, Json data);
+        public string getValue (ulong idx);
+        public string recv (string data);
+        public string recv (ulong index, string data);
 
         public string last ();
     }
@@ -821,11 +821,11 @@ unittest
         public this (bool isByzantine) { this.isByzantine = isByzantine; }
         public override @property ulong pubkey ()
         { lastCall = `pubkey`; return this.isByzantine ? 0 : 42; }
-        public override Json getValue (ulong idx)
-        { lastCall = `getValue`; return Json.init; }
-        public override string recv (Json data)
+        public override string getValue (ulong idx)
+        { lastCall = `getValue`; return null; }
+        public override string recv (string data)
         { lastCall = `recv@1`; return null; }
-        public override string recv (ulong index, Json data)
+        public override string recv (ulong index, string data)
         { lastCall = `recv@2`; return null; }
 
         public override string last () { return this.lastCall; }
@@ -868,9 +868,9 @@ unittest
         assert(node2.pubkey() == 0);
         assert(node2.last() == "pubkey");
 
-        node1.recv(42, Json.init);
+        node1.recv(42, null);
         assert(node1.last() == "recv@2");
-        node1.recv(Json.init);
+        node1.recv(null);
         assert(node1.last() == "recv@1");
         assert(node2.last() == "pubkey");
         node1.ctrl.shutdown();
