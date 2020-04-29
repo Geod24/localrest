@@ -1096,7 +1096,7 @@ private:
  */
 package class MessageBox
 {
-    this() @trusted nothrow /* TODO: make @safe after relevant druntime PR gets merged */
+    this() @safe nothrow
     {
         m_lock = new Mutex;
         m_closed = false;
