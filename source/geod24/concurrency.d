@@ -112,29 +112,20 @@ private
         static assert(!hasLocalAliasing!(SysTime, Container));
     }
 
-    enum MsgType
-    {
-        standard,
-        linkDead,
-    }
-
     struct Message
     {
-        MsgType type;
         Variant data;
 
-        this(T...)(MsgType t, T vals) if (T.length > 0)
+        this(T...)(T vals) if (T.length > 0)
         {
             static if (T.length == 1)
             {
-                type = t;
                 data = vals[0];
             }
             else
             {
                 import std.typecons : Tuple;
 
-                type = t;
                 data = Tuple!(T)(vals);
             }
         }
@@ -247,37 +238,6 @@ class MessageMismatch : Exception
 }
 
 /**
- * Thrown on calls to `receive` if the thread that spawned the receiving
- * thread has terminated and no more messages exist.
- */
-class OwnerTerminated : Exception
-{
-    ///
-    this(Tid t, string msg = "Owner terminated") @safe pure nothrow @nogc
-    {
-        super(msg);
-        tid = t;
-    }
-
-    Tid tid;
-}
-
-/**
- * Thrown if a linked thread has terminated.
- */
-class LinkTerminated : Exception
-{
-    ///
-    this(Tid t, string msg = "Link terminated") @safe pure nothrow @nogc
-    {
-        super(msg);
-        tid = t;
-    }
-
-    Tid tid;
-}
-
-/**
  * Thrown when a Tid is missing, e.g. when `ownerTid` doesn't
  * find an owner thread.
  */
@@ -351,39 +311,6 @@ public:
     return trus();
 }
 
-/**
- * Return the Tid of the thread which spawned the caller's thread.
- *
- * Throws: A `TidMissingException` exception if
- * there is no owner thread.
- */
-@property Tid ownerTid()
-{
-    import std.exception : enforce;
-
-    enforce!TidMissingException(thisInfo.owner.mbox !is null, "Error: Thread has no owner thread.");
-    return thisInfo.owner;
-}
-
-@system unittest
-{
-    import std.exception : assertThrown;
-
-    static void fun(Tid self)
-    {
-        string res = self.receiveOnly!string();
-        assert(res == "Main calling");
-        ownerTid.send("Child responding");
-    }
-
-    assertThrown!TidMissingException(ownerTid);
-    auto self = thisTid();
-    auto child = spawn(&fun);
-    child.send("Main calling");
-    string res = self.receiveOnly!string();
-    assert(res == "Child responding");
-}
-
 // Thread Creation
 
 private template isSpawnable(F, T...)
@@ -412,10 +339,7 @@ private template isSpawnable(F, T...)
  * Starts fn(args) in a new logical thread.
  *
  * Executes the supplied function in a new logical thread represented by
- * `Tid`.  The calling thread is designated as the owner of the new thread.
- * When the owner thread terminates an `OwnerTerminated` message will be
- * sent to the new thread, causing an `OwnerTerminated` exception to be
- * thrown on `receive()`.
+ * `Tid`.
  *
  * Params:
  *  fn   = The function to execute.
@@ -466,9 +390,9 @@ if (isSpawnable!(F, T))
 @system unittest
 {
     auto self = thisTid();
-    spawn((Tid self) {
-        ownerTid.send("This is so great!");
-    });
+    spawn((Tid self, Tid caller) {
+        caller.send("This is so great!");
+    }, self);
     assert(self.receiveOnly!string == "This is so great!");
 }
 
@@ -480,12 +404,10 @@ if (isSpawnable!(F, T))
 {
     // TODO: MessageList and &exec should be shared.
     auto spawnTid = Tid(new MessageBox);
-    auto ownerTid = thisTid;
 
     void exec()
     {
         thisInfo.ident = spawnTid;
-        thisInfo.owner = ownerTid;
         fn(spawnTid, args);
     }
 
@@ -550,16 +472,16 @@ if (isSpawnable!(F, T))
 void send(T...)(Tid tid, T vals)
 {
     static assert(!hasLocalAliasing!(T), "Aliases to mutable thread-local data not allowed.");
-    _send(MsgType.standard, tid, vals);
+    _send(tid, vals);
 }
 
 /*
  * Implementation of send.  This allows parameter checking to be different for
  * both Tid.send() and .send().
  */
-private void _send(T...)(MsgType type, Tid tid, T vals)
+private void _send(T...)(Tid tid, T vals)
 {
-    auto msg = Message(type, vals);
+    auto msg = Message(vals);
     tid.mbox.put(msg);
 }
 
@@ -594,30 +516,30 @@ do
 {
     import std.variant : Variant;
 
-    auto process = (Tid self)
+    auto process = (Tid self, Tid caller)
     {
         self.receive(
-            (int i) { ownerTid.send(1); },
-            (double f) { ownerTid.send(2); },
-            (Variant v) { ownerTid.send(3); }
+            (int i) { caller.send(1); },
+            (double f) { caller.send(2); },
+            (Variant v) { caller.send(3); }
         );
     };
 
     auto self = thisTid();
     {
-        auto tid = spawn(process);
+        auto tid = spawn(process, self);
         send(tid, 42);
         assert(self.receiveOnly!int == 1);
     }
 
     {
-        auto tid = spawn(process);
+        auto tid = spawn(process, self);
         send(tid, 3.14);
         assert(self.receiveOnly!int == 2);
     }
 
     {
-        auto tid = spawn(process);
+        auto tid = spawn(process, self);
         send(tid, "something else");
         assert(self.receiveOnly!int == 3);
     }
@@ -696,8 +618,6 @@ do
         static if (T.length)
             ret.field = val;
     },
-    (LinkTerminated e) { throw e; },
-    (OwnerTerminated e) { throw e; },
     (Variant val) {
         static if (T.length > 1)
             string exp = T.stringof;
@@ -823,7 +743,6 @@ do
 struct ThreadInfo
 {
     Tid ident;
-    Tid owner;
 
     /**
      * Gets a thread-local instance of ThreadInfo.
@@ -849,8 +768,6 @@ struct ThreadInfo
     {
         if (ident.mbox !is null)
             ident.mbox.close();
-        if (owner != Tid.init)
-            _send(MsgType.linkDead, owner, ident);
     }
 }
 
@@ -1067,7 +984,7 @@ private:
         while (m_fibers.length > 0)
         {
             auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
-            if (t !is null && !(cast(OwnerTerminated) t))
+            if (t !is null)
             {
                 throw t;
             }
@@ -1116,9 +1033,8 @@ package class MessageBox
 
     /*
      * If maxMsgs is not set, the message is added to the queue and the
-     * owner is notified.  If the queue is full, the message will still be
-     * accepted if it is a control message, otherwise onCrowdingDoThis is
-     * called.  If the routine returns true, this call will block until
+     * owner is notified. If the queue is full, onCrowdingDoThis is called.
+     * If the routine returns true, this call will block until
      * the owner has made space available in the queue.  If it returns
      * false, this call will abort.
      *
@@ -1150,11 +1066,6 @@ package class MessageBox
      * Returns:
      *  true if a message was retrieved and false if not (such as if a
      *  timeout occurred).
-     *
-     * Throws:
-     *  LinkTerminated if a linked thread terminated, or OwnerTerminated
-     * if the owner thread terminates and no existing messages match the
-     * supplied ops.
      */
     bool getUntimed(Ops...)(scope Ops ops)
     {
@@ -1189,35 +1100,6 @@ package class MessageBox
             return false;
         }
 
-        bool onLinkDeadMsg(ref Message msg)
-        {
-            assert(msg.convertsTo!(Tid),
-                   "Message could be converted to Tid");
-            auto tid = msg.get!(Tid);
-
-            if (tid == thisInfo.owner)
-            {
-                thisInfo.owner = Tid.init;
-                auto e = new OwnerTerminated(tid);
-                auto m = Message(MsgType.standard, e);
-                if (onStandardMsg(m))
-                    return true;
-                throw e;
-            }
-            return false;
-        }
-
-        bool onControlMsg(ref Message msg)
-        {
-            switch (msg.type)
-            {
-            case MsgType.linkDead:
-                return onLinkDeadMsg(msg);
-            default:
-                return false;
-            }
-        }
-
         bool scan(ref ListT list)
         {
             for (auto range = list[]; !range.empty;)
@@ -1227,37 +1109,13 @@ package class MessageBox
                 scope (failure)
                     list.removeAt(range);
 
-                if (isControlMsg(range.front))
+                if (onStandardMsg(range.front))
                 {
-                    if (onControlMsg(range.front))
-                    {
-                        // Although the linkDead message is a control message,
-                        // it can be handled by the user.  Since the linkDead
-                        // message throws if not handled, if we get here then
-                        // it has been handled and we can return from receive.
-                        // This is a weird special case that will have to be
-                        // handled in a more general way if more are added.
-                        if (!isLinkDeadMsg(range.front))
-                        {
-                            list.removeAt(range);
-                            continue;
-                        }
-                        list.removeAt(range);
-                        return true;
-                    }
-                    range.popFront();
-                    continue;
+                    list.removeAt(range);
+                    return true;
                 }
-                else
-                {
-                    if (onStandardMsg(range.front))
-                    {
-                        list.removeAt(range);
-                        return true;
-                    }
-                    range.popFront();
-                    continue;
-                }
+                range.popFront();
+                continue;
             }
             return false;
         }
@@ -1298,41 +1156,16 @@ package class MessageBox
     }
 
     /*
-     * Called on thread termination.  This routine processes any remaining
-     * control messages, clears out message queues, and sets a flag to
-     * reject any future messages.
+     * Called on thread termination.
+     *
+     * This routine clears out message queues and sets a flag to reject
+     * any future messages.
      */
     final void close()
     {
-        static void onLinkDeadMsg(ref Message msg)
-        {
-            assert(msg.convertsTo!(Tid),
-                   "Message could be converted to Tid");
-            auto tid = msg.get!(Tid);
-
-            if (tid == thisInfo.owner)
-                thisInfo.owner = Tid.init;
-        }
-
-        static void sweep(ref ListT list)
-        {
-            for (auto range = list[]; !range.empty; range.popFront())
-            {
-                if (range.front.type == MsgType.linkDead)
-                    onLinkDeadMsg(range.front);
-            }
-        }
-
-        ListT arrived;
-
-        sweep(m_localBox);
         synchronized (m_lock)
-        {
-            arrived.put(m_sharedBox);
             m_closed = true;
-        }
         m_localBox.clear();
-        sweep(arrived);
     }
 
 private:
@@ -1341,16 +1174,6 @@ private:
     void updateMsgCount() @safe @nogc pure nothrow
     {
         m_localMsgs = m_localBox.length;
-    }
-
-    bool isControlMsg(ref Message msg) @safe @nogc pure nothrow
-    {
-        return msg.type != MsgType.standard;
-    }
-
-    bool isLinkDeadMsg(ref Message msg) @safe @nogc pure nothrow
-    {
-        return msg.type == MsgType.linkDead;
     }
 
     alias OnMaxFn = bool function(Tid);
@@ -1547,11 +1370,11 @@ private:
 @system unittest
 {
     static shared int[] x = new shared(int)[1];
-    auto tid = spawn((Tid self) {
+    auto tid = spawn((Tid self, Tid caller) {
         auto arr = self.receiveOnly!(shared(int)[]);
         arr[0] = 5;
-        ownerTid.send(true);
-    });
+        caller.send(true);
+    }, thisTid);
     tid.send(x);
     auto self = thisTid();
     self.receiveOnly!(bool);
