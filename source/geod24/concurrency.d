@@ -42,6 +42,7 @@ import core.atomic;
 import core.sync.condition;
 import core.sync.mutex;
 import core.thread;
+import core.time : MonoTime;
 import std.range.primitives;
 import std.traits;
 
@@ -585,7 +586,7 @@ in
 do
 {
     checkops( ops );
-    self.mbox.get( ops );
+    self.mbox.getUntimed(ops);
 }
 
 ///
@@ -691,7 +692,7 @@ do
 
     Tuple!(T) ret;
 
-    self.mbox.get((T val) {
+    self.mbox.getUntimed((T val) {
         static if (T.length)
             ret.field = val;
     },
@@ -1155,25 +1156,15 @@ package class MessageBox
      * if the owner thread terminates and no existing messages match the
      * supplied ops.
      */
-    bool get(T...)(scope T vals)
+    bool getUntimed(Ops...)(scope Ops ops)
     {
-        import std.meta : AliasSeq;
+        return this.get(Duration.init, ops);
+    }
 
-        static assert(T.length, "T must not be empty");
-
-        static if (isImplicitlyConvertible!(T[0], Duration))
-        {
-            alias Ops = AliasSeq!(T[1 .. $]);
-            alias ops = vals[1 .. $];
-            enum timedWait = true;
-            Duration period = vals[0];
-        }
-        else
-        {
-            alias Ops = AliasSeq!(T);
-            alias ops = vals[0 .. $];
-            enum timedWait = false;
-        }
+    bool get(Ops...)(Duration period, scope Ops ops)
+    {
+        immutable timedWait = period !is Duration.init;
+        MonoTime limit = timedWait ? MonoTime.init : MonoTime.currTime + period;
 
         bool onStandardMsg(ref Message msg)
         {
@@ -1271,12 +1262,6 @@ package class MessageBox
             return false;
         }
 
-        static if (timedWait)
-        {
-            import core.time : MonoTime;
-            auto limit = MonoTime.currTime + period;
-        }
-
         while (true)
         {
             ListT arrived;
@@ -1291,7 +1276,7 @@ package class MessageBox
                 updateMsgCount();
                 while (m_sharedBox.empty)
                 {
-                    static if (timedWait)
+                    if (timedWait)
                     {
                         if (period <= Duration.zero || !m_putMsg.wait(period))
                             return false;
@@ -1307,7 +1292,7 @@ package class MessageBox
             if (scan(arrived))
                 return true;
 
-            static if (timedWait)
+            if (timedWait)
                 period = limit - MonoTime.currTime;
         }
     }
