@@ -224,7 +224,6 @@ private final class LocalScheduler : C.FiberScheduler
 
 
 /// We need a scheduler to simulate an event loop and to be re-entrant
-/// However, the one in `geod24.concurrency` is process-global (`__gshared`)
 private LocalScheduler scheduler;
 
 /// Whether this is the main thread
