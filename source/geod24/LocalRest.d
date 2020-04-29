@@ -468,7 +468,6 @@ public final class RemoteAPI (API) : API
                 while (1)
                 {
                     C.receiveTimeout(C.thisTid(), 10.msecs,
-                        (C.OwnerTerminated e) { throw exc; },
                         (ShutdownCommand e) { throw exc; },
                         (TimeCommand s)      {
                             control.sleep_until = Clock.currTime + s.dur;
