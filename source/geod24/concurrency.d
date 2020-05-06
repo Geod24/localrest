@@ -1075,7 +1075,7 @@ package class MessageBox
     bool get(Ops...)(Duration period, scope Ops ops)
     {
         immutable timedWait = period !is Duration.init;
-        MonoTime limit = timedWait ? MonoTime.init : MonoTime.currTime + period;
+        MonoTime limit = timedWait ? MonoTime.currTime + period : MonoTime.init;
 
         bool onStandardMsg(ref Message msg)
         {
