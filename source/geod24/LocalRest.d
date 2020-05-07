@@ -482,7 +482,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         try scheduler.start(() {
                 while (1)
                 {
-                    C.receiveTimeout(C.thisTid(), 10.msecs,
+                    C.receiveTimeout(self, 10.msecs,
                         (ShutdownCommand e) { throw exc; },
                         (TimeCommand s)      {
                             control.sleep_until = Clock.currTime + s.dur;
