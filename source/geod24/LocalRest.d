@@ -382,7 +382,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                             res.data = SerializedData(e.toString());
                     }
 
-                    C.send(cmd.sender, res);
+                    C.trySend(cmd.sender, res);
                     return;
                 }.format(member, ovrld.mangleof));
             }
@@ -740,7 +740,12 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
                         auto command = Command(C.thisTid(), scheduler.getNextResponseId(), ovrld.mangleof,
                                                SerializedData(serialized));
-                        C.send(this.childTid, command);
+
+                        // If the node already shut down, its MessageBox will be
+                        // closed. Detect it and notify the user.
+                        // Note that it might be expected that the remote died.
+                        if (!C.trySend(this.childTid, command))
+                            throw new Exception("Connection with peer closed");
 
                         // for the main thread, we run the "event loop" until
                         // the request we're interested in receives a response.
@@ -1696,4 +1701,74 @@ unittest
     ubyte[64] val = 42;
     assert(test.getHash(val) == val[0 .. 32]);
     test.ctrl.shutdown();
+}
+
+/// Test node2 responding to a dead node1
+/// See https://github.com/Geod24/localrest/issues/64
+unittest
+{
+    static interface API
+    {
+        @safe:
+        // Main thread calls this on the first node
+        public void call0 ();
+        // ... which then calls this on the second node
+        public void call1 ();
+        public void call2 ();
+    }
+
+    __gshared C.Tid node1Addr;
+    __gshared C.Tid node2Addr;
+
+    static class Node : API
+    {
+        private RemoteAPI!API self;
+
+        @trusted:
+        // Main -> Node 1
+        public override void call0 ()
+        {
+            this.self = new RemoteAPI!API(node1Addr);
+            scope node2 = new RemoteAPI!API(node2Addr);
+            node2.call1();
+            assert(0, "This should never return as call2 shutdown this node");
+        }
+
+        // Node 1 -> Node 2
+        public override void call1 ()
+        {
+            assert(this.self is null);
+            scope node1 = new RemoteAPI!API(node1Addr);
+            node1.call2();
+            // Make really sure Node 1 is dead
+            while (!node1Addr.mbox.isClosed())
+                sleep(100.msecs);
+        }
+
+        // Node 2 -> Node 1
+        public override void call2 ()
+        {
+            assert(this.self !is null);
+            this.self.ctrl.shutdown();
+        }
+    }
+
+    // Long timeout to ensure we don't spuriously pass
+    auto node1 = RemoteAPI!API.spawn!Node(500.msecs);
+    auto node2 = RemoteAPI!API.spawn!Node();
+    node1Addr = node1.ctrl.tid();
+    node2Addr = node2.ctrl.tid();
+
+    // This will timeout (because the node will be gone)
+    // However if something is wrong, either `joinall` will never return,
+    // or the `assert(0)` in `call0` will be triggered.
+    try
+    {
+        node1.call0();
+        assert(0, "This should have timed out");
+    }
+    catch (Exception e) {}
+
+    node2.ctrl.shutdown();
+    thread_joinAll();
 }
