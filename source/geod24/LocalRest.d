@@ -408,14 +408,11 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
     ***************************************************************************/
 
     private static void spawned (Implementation) (C.Tid self, CtorParams!Implementation cargs)
+        nothrow
     {
         import std.datetime.systime : Clock, SysTime;
         import std.algorithm : each;
         import std.range;
-
-        scope node = new Implementation(cargs);
-        scheduler = new LocalScheduler;
-        scope exc = new Exception("You should never see this exception - please report a bug");
 
         // very simple & limited variant, to keep it performant.
         // should be replaced by a real Variant later
@@ -449,26 +446,32 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                 && Clock.currTime < control.sleep_until;
         }
 
-        void handle (T)(T arg)
-        {
-            static if (is(T == Command))
-            {
-                scheduler.spawn(() => handleCommand(arg, node, control.filter));
-            }
-            else static if (is(T == Response))
-            {
-                scheduler.pending = arg;
-                scheduler.waiting[arg.id].c.notify();
-                scheduler.remove(arg.id);
-            }
-            else static assert(0, "Unhandled type: " ~ T.stringof);
-        }
-
         // we need to keep track of messages which were ignored when
         // node.sleep() was used, and then handle each message in sequence.
         Variant[] await_msgs;
 
-        try scheduler.start(() {
+        scope exc = new Exception("You should never see this exception - please report a bug");
+        try
+        {
+            scope node = new Implementation(cargs);
+            scheduler = new LocalScheduler;
+
+            void handle (T)(T arg)
+            {
+                static if (is(T == Command))
+                {
+                    scheduler.spawn(() => handleCommand(arg, node, control.filter));
+                }
+                else static if (is(T == Response))
+                {
+                    scheduler.pending = arg;
+                    scheduler.waiting[arg.id].c.notify();
+                    scheduler.remove(arg.id);
+                }
+                else static assert(0, "Unhandled type: " ~ T.stringof);
+            }
+
+            scheduler.start(() {
                 while (1)
                 {
                     C.receiveTimeout(self, 10.msecs,
@@ -503,9 +506,20 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                     }
                 }
             });
-        catch (Exception e)
-            if (e !is exc)
-                throw e;
+        }
+        catch (Throwable t)
+        {
+            // We use this exception to exit the event loop
+            if (t is exc)
+                return;
+
+            import core.stdc.stdio, std.stdio;
+            printf("#### INTERNAL ERROR: %.*s\n", cast(int) t.msg.length, t.msg.ptr);
+            printf("Please file a bug at https://github.com/Geod24/localrest/\n");
+
+            try writeln("Full error: ", t);
+            catch (Exception e) { /* Nothing more we can do at this point */ }
+        }
     }
 
     /// Where to send message to
