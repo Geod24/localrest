@@ -472,17 +472,16 @@ if (isSpawnable!(F, T))
 void send(T...)(Tid tid, T vals)
 {
     static assert(!hasLocalAliasing!(T), "Aliases to mutable thread-local data not allowed.");
-    _send(tid, vals);
+    auto msg = Message(vals);
+    tid.mbox.put(msg) || assert(0, "MessageBox is closed");
 }
 
-/*
- * Implementation of send.  This allows parameter checking to be different for
- * both Tid.send() and .send().
- */
-private void _send(T...)(Tid tid, T vals)
+/// Ditto, but do not assert in case of failure
+bool trySend(T...)(Tid tid, T vals)
 {
+    static assert(!hasLocalAliasing!(T), "Aliases to mutable thread-local data not allowed.");
     auto msg = Message(vals);
-    tid.mbox.put(msg);
+    return tid.mbox.put(msg);
 }
 
 /**
@@ -1041,19 +1040,19 @@ package class MessageBox
      * Params:
      *  msg = The message to put in the queue.
      *
-     * Throws:
-     *  An exception if the queue is full and onCrowdingDoThis throws.
+     * Returns:
+     *  `false` if the message box is closed, `true` otherwise
      */
-    final void put(ref Message msg)
+    final bool put (ref Message msg)
     {
         synchronized (m_lock)
         {
-            // Note: This keeps the lock, potentially blocking other coroutines
             if (m_closed)
-                assert(0, "Error: MessageBox is closed");
+                return false;
             m_sharedBox.put(msg);
             m_putMsg.notify();
         }
+        return true;
     }
 
     /*
