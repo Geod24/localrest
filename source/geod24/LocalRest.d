@@ -317,10 +317,11 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
     ***************************************************************************/
 
-    public static RemoteAPI spawn (Impl) (CtorParams!Impl args,
-        Duration timeout = Duration.init)
+    public static RemoteAPI spawn (Impl) (
+        CtorParams!Impl args, Duration timeout = Duration.init,
+        string file = __FILE__, int line = __LINE__)
     {
-        auto childTid = C.spawn(&spawned!(Impl), args);
+        auto childTid = C.spawn(&spawned!(Impl), file, line, args);
         return new RemoteAPI(childTid, timeout);
     }
 
@@ -403,11 +404,14 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
        Params:
            Implementation = Type of the implementation to instantiate
            self = The channel on which to "listen" to receive new "connections"
+           file = Path to the file that spawned this node
+           line = Line number in the `file` that spawned this node
            cargs = Arguments to `Implementation`'s constructor
 
     ***************************************************************************/
 
-    private static void spawned (Implementation) (C.Tid self, CtorParams!Implementation cargs)
+    private static void spawned (Implementation) (
+        C.Tid self, string file, int line, CtorParams!Implementation cargs)
         nothrow
     {
         import std.datetime.systime : Clock, SysTime;
@@ -515,6 +519,8 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
             import core.stdc.stdio, std.stdio;
             printf("#### INTERNAL ERROR: %.*s\n", cast(int) t.msg.length, t.msg.ptr);
+            printf("This node was started at %.*s:%d\n",
+                   cast(int) file.length, file.ptr, line);
             printf("Please file a bug at https://github.com/Geod24/localrest/\n");
 
             try writeln("Full error: ", t);
