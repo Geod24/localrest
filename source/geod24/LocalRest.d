@@ -359,41 +359,29 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                 mixin(
                 q{
                     case `%2$s`:
-                    try
-                    {
-                        if (cmd.method == filter.func_mangleof)
-                        {
-                            // we have to send back a message
-                            import std.format;
-                            C.send(cmd.sender, Response(Status.Failed, cmd.id,
-                                SerializedData(format("Filtered method '%%s'", filter.pretty_func))));
-                            return;
-                        }
+                    Response res = Response(Status.Failed, cmd.id);
 
+                    // Provide informative message in case of filtered method
+                    if (cmd.method == filter.func_mangleof)
+                        res.data = SerializedData(format("Filtered method '%%s'", filter.pretty_func));
+                    else
+                    {
                         auto args = S.deserialize!(ArgWrapper!(Parameters!ovrld))(
                             cmd.args.getS!S);
 
-                        static if (!is(ReturnType!ovrld == void))
+                        try
                         {
-                            C.send(cmd.sender,
-                                Response(
-                                    Status.Success,
-                                    cmd.id,
-                                    SerializedData(S.serialize(node.%1$s(args.args)))));
+                            static if (!is(ReturnType!ovrld == void))
+                                res.data = SerializedData(S.serialize(node.%1$s(args.args)));
+                            else
+                                node.%1$s(args.args);
+                            res.status = Status.Success;
                         }
-                        else
-                        {
-                            node.%1$s(args.args);
-                            C.send(cmd.sender, Response(Status.Success, cmd.id));
-                        }
-                    }
-                    catch (Throwable t)
-                    {
-                        // Our sender expects a response
-                        C.send(cmd.sender,
-                               Response(Status.Failed, cmd.id, SerializedData(t.toString())));
+                        catch (Exception e)
+                            res.data = SerializedData(e.toString());
                     }
 
+                    C.send(cmd.sender, res);
                     return;
                 }.format(member, ovrld.mangleof));
             }
