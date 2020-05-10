@@ -414,7 +414,8 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
        Params:
            Implementation = Type of the implementation to instantiate
-           args = Arguments to `Implementation`'s constructor
+           self = The channel on which to "listen" to receive new "connections"
+           cargs = Arguments to `Implementation`'s constructor
 
     ***************************************************************************/
 
