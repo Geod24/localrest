@@ -285,7 +285,7 @@ public void sleep (Duration timeout)
 
     Params:
       API = The interface defining the API to implement
-      Serializer = An aggregate which follows the requirement explained above.
+      S = An aggregate which follows the requirement explained above.
 
 *******************************************************************************/
 
@@ -311,6 +311,8 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
           Impl = Type of the implementation to instantiate
           args = Arguments to the object's constructor
           timeout = (optional) timeout to use with requests
+          file = Path to the file that called this function (for diagnostic)
+          line = Line number tied to the `file` parameter
 
         Returns:
           A `RemoteAPI` owning the node reference
