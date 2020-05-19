@@ -40,6 +40,21 @@
     methods, for some defined time or until unblocked.
     See `sleep`, `filter`, and `clearFilter` for more details.
 
+    Shutdown:
+    The control interface has a shutdown method that can be used to terminate
+    a node gracefully. When the shutdown request is handled by the node,
+    the event loop will exit and the thread will terminate. While the destructor
+    of the node will be called, it might not usable for some actions, for example
+    because D destructors may not allocate GC memory, or one may want
+    to perform some test-specific operations, such a logging some data in case of failure.
+    Therefore, you may provide a shutdown routine in the call to `shutdown`.
+    It must accept a single argument of the interface type, and will be called
+    with the implementation object just before the node is destroyed.
+    If this routine throws, LocalRest will log the error in the console and
+    proceed with destroying the stack-allocated node.
+    Note that control requests are asynchronous, hence requests from the node
+    might be processed / send by the node until the request is actually processed.
+
     Event_Loop:
     Server process usually needs to perform some action in an asynchronous way.
     Additionally, some actions needs to be completed at a semi-regular interval,
@@ -116,8 +131,10 @@ private struct TimeCommand
 }
 
 /// Ask the node to shut down
-private struct ShutdownCommand
+private struct ShutdownCommand (API)
 {
+    /// Any callback to call before the Node's destructor is called
+    void function (API) callback;
 }
 
 /// Filter out requests before they reach a node
@@ -481,7 +498,13 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                 while (1)
                 {
                     C.receiveTimeout(self, 10.msecs,
-                        (ShutdownCommand e) { throw exc; },
+                        (ShutdownCommand!API e)
+                        {
+                            if (e.callback !is null)
+                                e.callback(node);
+
+                            throw exc;
+                        },
                         (TimeCommand s)      {
                             control.sleep_until = Clock.currTime + s.dur;
                             control.drop = s.drop;
@@ -594,11 +617,17 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
             Send an async message to the thread to immediately shut down.
 
+            Params:
+                callback = if not null, the callback to call in the Node's
+                           thread before the Node is destroyed. Can be used
+                           for cleanup / logging routines.
+
         ***********************************************************************/
 
-        public void shutdown () @trusted
+        public void shutdown (void function (API) callback = null)
+            @trusted
         {
-            C.send(this.childTid, ShutdownCommand());
+            C.send(this.childTid, ShutdownCommand!API(callback));
         }
 
         /***********************************************************************
@@ -821,6 +850,46 @@ unittest
     scope test = RemoteAPI!API.spawn!MockAPI();
     assert(test.pubkey() == 42);
     test.ctrl.shutdown();
+}
+
+/// Example where a shutdown() routine must be called on a node before
+/// its destructor is called
+unittest
+{
+    __gshared bool dtor_called;
+    __gshared bool shutdown_called;
+    __gshared bool onDestroy_called;
+
+    static interface API
+    {
+        @safe:
+        public @property ulong pubkey ();
+    }
+
+    static class MockAPI : API
+    {
+        public override @property ulong pubkey () @safe
+        { return 42; }
+        public void shutdown () { shutdown_called = true; }
+        ~this () { dtor_called = true; }
+    }
+
+    static void onDestroy (API node)
+    {
+        assert(!dtor_called);
+        auto mock = cast(MockAPI)node;
+        assert(mock !is null);
+        mock.shutdown();
+        onDestroy_called = true;
+    }
+
+    scope test = RemoteAPI!API.spawn!MockAPI();
+    assert(test.pubkey() == 42);
+    test.ctrl.shutdown(&onDestroy);
+    // ctr.shutdown call is asynchronous
+    while (!dtor_called) Thread.sleep(100.msecs);
+    assert(onDestroy_called);
+    assert(shutdown_called);
 }
 
 /// In a real world usage, users will most likely need to use the registry
