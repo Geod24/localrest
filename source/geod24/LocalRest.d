@@ -282,6 +282,37 @@ public void sleep (Duration timeout)
     cond.wait(timeout);
 }
 
+/*******************************************************************************
+
+    Run an asynchronous task after a given time.
+
+    The task will first run after the given `timeout`, and
+    can either repeat or run only once (the default).
+    Works similarly to Vibe.d's `setTimer`.
+
+    Params:
+        timeout = Determines the minimum amount of time that elapses before
+            the timer fires.
+        dg = If non-null, this delegate will be called when the timer fires
+        periodic = Speficies if the timer fires repeatedly or only once
+
+*******************************************************************************/
+
+public void setTimer (Duration timeout, void delegate() dg,
+    bool periodic = false)
+{
+    assert(scheduler !is null, "Cannot call this delegate from the main thread");
+    assert(dg !is null, "Cannot call this delegate if null");
+    scheduler.schedule(
+    ()
+    {
+        do
+        {
+            sleep(timeout);
+            dg();
+        } while (periodic);
+    });
+}
 
 /*******************************************************************************
 
@@ -1842,4 +1873,47 @@ unittest
 
     node2.ctrl.shutdown();
     thread_joinAll();
+}
+
+/// Test setTimer
+unittest
+{
+    static import core.thread;
+    import core.time;
+
+    static interface API
+    {
+        public void startTimer ();
+        public ulong getCounter ();
+    }
+
+    static class Node : API
+    {
+        public override void startTimer ()
+        {
+            setTimer(100.msecs, &callback, /* periodic: */ true);
+        }
+
+        public void callback () @safe
+        {
+            this.counter++;
+        }
+
+        public override ulong getCounter ()
+        {
+            scope (exit) this.counter = 0;
+            return this.counter;
+        }
+
+        private ulong counter;
+    }
+
+    auto node = RemoteAPI!API.spawn!Node();
+    assert(node.getCounter() == 0);
+    node.startTimer();
+    core.thread.Thread.sleep(1.seconds);
+    // The expected count is 9
+    // Check means the timer repeated
+    assert(node.getCounter() >= 2);
+    node.ctrl.shutdown();
 }
