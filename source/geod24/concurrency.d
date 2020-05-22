@@ -1159,7 +1159,6 @@ package class MessageBox
             FiberScheduler.yield();
             synchronized (m_lock)
             {
-                updateMsgCount();
                 while (m_sharedBox.empty)
                 {
                     if (timedWait)
@@ -1197,12 +1196,6 @@ package class MessageBox
     }
 
 private:
-    // Routines involving local data only, no lock needed.
-
-    void updateMsgCount() @safe @nogc pure nothrow
-    {
-        m_localMsgs = m_localBox.length;
-    }
 
     alias OnMaxFn = bool function(Tid);
     alias ListT = List!(Message);
@@ -1213,7 +1206,6 @@ private:
     Condition m_putMsg;
     ListT m_sharedBox;
     OnMaxFn m_onMaxMsgs;
-    size_t m_localMsgs;
     bool m_closed;
 }
 
