@@ -830,6 +830,8 @@ class FiberScheduler
     void start(void delegate() op)
     {
         create(op);
+        // Make sure the just-created fiber is run first
+        this.m_pos = this.m_fibers.length - 1;
         dispatch();
     }
 
@@ -1002,6 +1004,15 @@ private:
 private:
     Fiber[] m_fibers;
     size_t m_pos;
+}
+
+/// Ensure argument to `start` is run first
+unittest
+{
+    scope sched = new FiberScheduler();
+    bool startHasRun;
+    sched.spawn(() => assert(startHasRun));
+    sched.start(() { startHasRun = true; });
 }
 
 /*
