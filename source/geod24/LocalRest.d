@@ -1061,7 +1061,7 @@ unittest
     auto node1 = factory("normal", 1);
     auto node2 = factory("byzantine", 2);
 
-    static void testFunc(geod24.concurrency.Tid self, geod24.concurrency.Tid parent)
+    static void testFunc()
     {
         auto node1 = factory("this does not matter", 1);
         auto node2 = factory("neither does this", 2);
@@ -1077,13 +1077,13 @@ unittest
         assert(node2.last() == "pubkey");
         node1.ctrl.shutdown();
         node2.ctrl.shutdown();
-        geod24.concurrency.send(parent, 42);
     }
 
-    auto self = geod24.concurrency.thisTid();
-    auto testerFiber = geod24.concurrency.spawn(&testFunc, self);
+    scope thread = new Thread(&testFunc);
+    thread.start();
     // Make sure our main thread terminates after everyone else
-    geod24.concurrency.receiveOnly!int(self);
+    thread.join();
+
 }
 
 /// This network have different types of nodes in it
