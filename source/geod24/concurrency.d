@@ -845,6 +845,24 @@ class FiberScheduler
         FiberScheduler.yield();
     }
 
+    /**************************************************************************
+
+        Schedule a task to be run next time the scheduler yields
+
+        Behave similarly to `spawn`, but instead of running the task
+        immediately, it simply adds it to the queue and continue executing
+        the current task.
+
+        Params:
+            op = Operation to run
+
+    **************************************************************************/
+
+    void schedule(void delegate() op) nothrow
+    {
+        this.create(op);
+    }
+
     /**
      * If the caller is a scheduled Fiber, this yields execution to another
      * scheduled Fiber.
