@@ -37,8 +37,8 @@
     a few extra functionalities are offered under a control interface,
     accessible under the `ctrl` namespace in the instance.
     The control interface allows to make the node unresponsive to one or all
-    methods, for some defined time or until unblocked.
-    See `sleep`, `filter`, and `clearFilter` for more details.
+    methods, for some defined time or until unblocked, as well as trigger
+    shutdowns or restart. See the methods for more details.
 
     Shutdown:
     The control interface has a shutdown method that can be used to terminate
@@ -54,6 +54,7 @@
     proceed with destroying the stack-allocated node.
     Note that control requests are asynchronous, hence requests from the node
     might be processed / send by the node until the request is actually processed.
+    There is also a `restart` method which accepts the same callback argument.
 
     Event_Loop:
     Server process usually needs to perform some action in an asynchronous way.
@@ -135,6 +136,9 @@ private struct ShutdownCommand (API)
 {
     /// Any callback to call before the Node's destructor is called
     void function (API) callback;
+
+    /// Whether we're restarting or really shutting down
+    bool restart;
 }
 
 /// Filter out requests before they reach a node
@@ -468,6 +472,17 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         import std.algorithm : each;
         import std.range;
 
+        /// Simple exception unwind the stack when we need to terminate/restart
+        static final class ExitException : Exception
+        {
+            bool restart;
+
+            this () @safe pure nothrow @nogc
+            {
+                super("You should never see this exception - please report a bug");
+            }
+        }
+
         // very simple & limited variant, to keep it performant.
         // should be replaced by a real Variant later
         static struct Variant
@@ -504,8 +519,9 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         // node.sleep() was used, and then handle each message in sequence.
         Variant[] await_msgs;
 
-        scope exc = new Exception("You should never see this exception - please report a bug");
-        try
+        scope exc = new ExitException();
+
+        void runNode ()
         {
             scope node = new Implementation(cargs);
             scheduler = new LocalScheduler;
@@ -533,7 +549,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                         {
                             if (e.callback !is null)
                                 e.callback(node);
-
+                            exc.restart = e.restart;
                             throw exc;
                         },
                         (TimeCommand s)      {
@@ -567,12 +583,22 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                 }
             });
         }
+
+        try
+        {
+            while (true)
+            {
+                try runNode();
+                // We use this exception to exit the event loop
+                catch (ExitException e)
+                {
+                    if (!e.restart)
+                        break;
+                }
+            }
+        }
         catch (Throwable t)
         {
-            // We use this exception to exit the event loop
-            if (t is exc)
-                return;
-
             import core.stdc.stdio, std.stdio;
             printf("#### INTERNAL ERROR: %.*s\n", cast(int) t.msg.length, t.msg.ptr);
             printf("This node was started at %.*s:%d\n",
@@ -658,7 +684,27 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         public void shutdown (void function (API) callback = null)
             @trusted
         {
-            C.send(this.childTid, ShutdownCommand!API(callback));
+            C.send(this.childTid, ShutdownCommand!API(callback, false));
+        }
+
+        /***********************************************************************
+
+            Send an async message to the thread to immediately restart.
+
+            Note that further non-control messages to the node will block until
+            the node is back "online".
+
+            Params:
+                callback = if not null, the callback to call in the Node's
+                           thread before the Node is destroyed, but before
+                           it is restarted. Can be used for cleanup or logging.
+
+        ***********************************************************************/
+
+        public void restart (void function (API) callback = null)
+            @trusted
+        {
+            C.send(this.childTid, ShutdownCommand!API(callback, true));
         }
 
         /***********************************************************************
@@ -1916,4 +1962,43 @@ unittest
     // Check means the timer repeated
     assert(node.getCounter() >= 2);
     node.ctrl.shutdown();
+}
+
+/// Test restarting a node
+unittest
+{
+    static interface API
+    {
+        public uint[2] getCount () @safe;
+    }
+
+    static class Node : API
+    {
+        private static uint instantiationCount;
+        private static uint destructionCount;
+
+        this ()
+        {
+            Node.instantiationCount++;
+        }
+
+        ~this ()
+        {
+            Node.destructionCount++;
+        }
+
+        public override uint[2] getCount () const @safe
+        {
+            return [ Node.instantiationCount, Node.destructionCount, ];
+        }
+    }
+
+    auto node = RemoteAPI!API.spawn!Node();
+    assert(node.getCount == [1, 0]);
+    node.ctrl.restart();
+    assert(node.getCount == [2, 1]);
+    node.ctrl.restart();
+    assert(node.getCount == [3, 2]);
+    node.ctrl.shutdown();
+    thread_joinAll();
 }
