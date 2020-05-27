@@ -39,6 +39,9 @@
     The control interface allows to make the node unresponsive to one or all
     methods, for some defined time or until unblocked, as well as trigger
     shutdowns or restart. See the methods for more details.
+    The `withTimeout` control method can be used to spawn a scoped copy
+    of the RemoteAPI with a custom configured timeout. The user-provided
+    delegate will be called with this scoped copy that uses the new timeout.
 
     Shutdown:
     The control interface has a shutdown method that can be used to terminate
@@ -820,6 +823,30 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         {
             C.send(this.childTid, FilterAPI(""));
         }
+
+        /***********************************************************************
+
+            Call the provided delegate with a custom timeout
+
+            This allow to perform requests on a client with a different timeout,
+            usually to allow some requests (e.g. initialization calls) to have longer
+            timeout, or no timeout at all, or to put a timeout on an otherwise
+            timeout-less client (e.g. when calling the actual test which could fail).
+
+            To disable timeout, pass the special value `Duration.zero`
+            (or `0.seconds`, `0.msecs`, etc...).
+
+            Params:
+                timeout = the new timeout to use
+                dg = the delegate to call with the new scoped RemoteAPI copy
+
+        ***********************************************************************/
+
+        public void withTimeout (Dg) (Duration timeout, scope Dg dg) @trusted
+        {
+            scope api = new RemoteAPI(this.childTid, timeout);
+            dg(api);
+        }
     }
 
     /***************************************************************************
@@ -1500,6 +1527,28 @@ unittest
     // node with no timeout
     auto node = RemoteAPI!API.spawn!Node();
     assert(node.sleepFor(80) == 42);  // no timeout
+
+    // custom timeout
+    bool called;
+    node.ctrl.withTimeout(100.msecs,
+        (scope RemoteAPI!API api) {
+            assertThrown!Exception(api.sleepFor(2000));
+            called = true;
+        });
+    assert(called);
+
+    called = false;
+    struct S
+    {
+        void opCall (scope RemoteAPI!API api)
+        {
+            assertThrown!Exception(api.sleepFor(2000));
+            called = true;
+        }
+    }
+    S s;
+    node.ctrl.withTimeout(100.msecs, s);
+    assert(called);
 
     // node with a configured timeout
     auto to_node = RemoteAPI!API.spawn!Node(500.msecs);
