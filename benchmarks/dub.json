@@ -1,0 +1,7 @@
+{
+    "name": "localrest_benchmarks",
+    "description": "Benchmark code for localrest",
+    "dependencies" : {
+        "localrest": { "path": "../", "version": "*" }
+    }
+}
