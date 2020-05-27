@@ -1532,7 +1532,7 @@ unittest
     // custom timeout
     bool called;
     node.ctrl.withTimeout(100.msecs,
-        (scope RemoteAPI!API api) {
+        (scope API api) {
             assertThrown!Exception(api.sleepFor(2000));
             called = true;
         });
@@ -1541,7 +1541,7 @@ unittest
     called = false;
     struct S
     {
-        void opCall (scope RemoteAPI!API api)
+        void opCall (scope API api)
         {
             assertThrown!Exception(api.sleepFor(2000));
             called = true;
