@@ -1197,7 +1197,6 @@ package class MessageBox
 
 private:
 
-    alias OnMaxFn = bool function(Tid);
     alias ListT = List!(Message);
 
     ListT m_localBox;
@@ -1205,7 +1204,6 @@ private:
     Mutex m_lock;
     Condition m_putMsg;
     ListT m_sharedBox;
-    OnMaxFn m_onMaxMsgs;
     bool m_closed;
 }
 
