@@ -104,7 +104,7 @@ module geod24.LocalRest;
 static import C = geod24.concurrency;
 import geod24.Serialization;
 import std.meta : AliasSeq;
-import std.traits : Parameters, ReturnType;
+import std.traits : fullyQualifiedName, Parameters, ReturnType;
 
 import core.thread;
 import core.time;
@@ -840,9 +840,13 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
         ***********************************************************************/
 
-        public void withTimeout (Dg) (Duration timeout, scope Dg dg) @trusted
+        public void withTimeout (Dg) (Duration timeout, scope Dg dg)
         {
             scope api = new RemoteAPI(this.childTid, timeout);
+            static assert(is(typeof({ dg(api); })),
+                          "Provided argument of type `" ~ Dg.stringof ~
+                          "` is not callable with argument type `scope " ~
+                          fullyQualifiedName!API ~ "`");
             dg(api);
         }
     }
@@ -1550,6 +1554,16 @@ unittest
     S s;
     node.ctrl.withTimeout(100.msecs, s);
     assert(called);
+
+    // Test that attributes are inferred based on the delegate
+    void doTest () @safe pure nothrow @nogc
+    {
+        called = false;
+        node.ctrl.withTimeout(Duration.zero,
+                              (scope API api) { called = true; });
+        assert(called);
+    }
+    doTest();
 
     // node with a configured timeout
     auto to_node = RemoteAPI!API.spawn!Node(500.msecs);
