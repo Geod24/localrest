@@ -898,23 +898,6 @@ class FiberScheduler
         return ThreadInfo.thisInfo;
     }
 
-    /**
-     * Returns a Condition analog that yields when wait or notify is called.
-     *
-     * Bug:
-     * For the default implementation, `notifyAll`will behave like `notify`.
-     *
-     * Params:
-     *   m = A `Mutex` to use for locking if the condition needs to be waited on
-     *       or notified from multiple `Thread`s.
-     *       If `null`, no `Mutex` will be used and it is assumed that the
-     *       `Condition` is only waited on/notified from one `Thread`.
-     */
-    Condition newCondition(Mutex m) nothrow
-    {
-        return new FiberCondition();
-    }
-
 protected:
     /**
      * Creates a new Fiber which calls the given delegate.

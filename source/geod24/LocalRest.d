@@ -206,12 +206,6 @@ private final class LocalScheduler : C.FiberScheduler
     /// Request IDs waiting for a response
     private Waiting[ulong] waiting;
 
-    /// Should never be called from outside
-    public override Condition newCondition(Mutex m = null) nothrow
-    {
-        assert(0);
-    }
-
     /// Get the next available request ID
     public size_t getNextResponseId ()
     {
