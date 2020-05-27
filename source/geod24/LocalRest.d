@@ -619,9 +619,6 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
     /// Timeout to use when issuing requests
     private const Duration timeout;
 
-    // Vibe.d mandates that method must be @safe
-    @safe:
-
     /***************************************************************************
 
         Create an instante of a client
@@ -636,7 +633,8 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
     ***************************************************************************/
 
-    public this (C.Tid tid, Duration timeout = Duration.init) @nogc pure nothrow
+    public this (C.Tid tid, Duration timeout = Duration.init)
+        @safe @nogc pure nothrow
     {
         this.childTid = tid;
         this.timeout = timeout;
@@ -848,6 +846,9 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
             dg(api);
         }
     }
+
+    // Vibe.d mandates that method must be @safe
+    @safe:
 
     /***************************************************************************
 
