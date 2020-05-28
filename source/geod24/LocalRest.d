@@ -959,6 +959,7 @@ unittest
     scope test = RemoteAPI!API.spawn!MockAPI();
     assert(test.pubkey() == 42);
     test.ctrl.shutdown();
+    thread_joinAll();
 }
 
 /// Example where a shutdown() routine must be called on a node before
@@ -995,8 +996,9 @@ unittest
     scope test = RemoteAPI!API.spawn!MockAPI();
     assert(test.pubkey() == 42);
     test.ctrl.shutdown(&onDestroy);
+    thread_joinAll();
     // ctr.shutdown call is asynchronous
-    while (!dtor_called) Thread.sleep(100.msecs);
+    assert(dtor_called);
     assert(onDestroy_called);
     assert(shutdown_called);
 }
@@ -1087,8 +1089,7 @@ unittest
     scope thread = new Thread(&testFunc);
     thread.start();
     // Make sure our main thread terminates after everyone else
-    thread.join();
-
+    thread_joinAll();
 }
 
 /// This network have different types of nodes in it
@@ -1167,6 +1168,7 @@ unittest
     assert(nodes[0].requests() == 7);
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
+    thread_joinAll();
 }
 
 /// Support for circular nodes call
@@ -1219,6 +1221,7 @@ unittest
 
     import std.algorithm;
     nodes.each!(node => node.ctrl.shutdown());
+    thread_joinAll();
 }
 
 
@@ -1271,6 +1274,7 @@ unittest
     assert(node.getCounter() >= 9);
     assert(node.getCounter() == 0);
     node.ctrl.shutdown();
+    thread_joinAll();
 }
 
 // Sane name insurance policy
@@ -1298,6 +1302,7 @@ unittest
     }
     static assert(!is(typeof(RemoteAPI!DoesntWork)));
     node.ctrl.shutdown();
+    thread_joinAll();
 }
 
 // Simulate temporary outage
@@ -1368,6 +1373,7 @@ unittest
 
     n1.ctrl.shutdown();
     n2.ctrl.shutdown();
+    thread_joinAll();
 }
 
 // Filter commands
@@ -1507,6 +1513,7 @@ unittest
 
     filtered.ctrl.shutdown();
     caller.ctrl.shutdown();
+    thread_joinAll();
 }
 
 // request timeouts (from main thread)
@@ -1578,6 +1585,7 @@ unittest
     Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
+    thread_joinAll();
 }
 
 // test-case for responses to re-used requests (from main thread)
@@ -1622,6 +1630,7 @@ unittest
 
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
+    thread_joinAll();
 }
 
 // request timeouts (foreign node to another node)
@@ -1662,6 +1671,7 @@ unittest
     node_1.check();
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
+    thread_joinAll();
 }
 
 // test-case for zombie responses
@@ -1704,6 +1714,7 @@ unittest
     node_1.check();
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
+    thread_joinAll();
 }
 
 // request timeouts with dropped messages
@@ -1741,6 +1752,7 @@ unittest
     node_1.check();
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
+    thread_joinAll();
 }
 
 // Test a node that gets a replay while it's delayed
@@ -1782,6 +1794,7 @@ unittest
     assert(node_1.ping() == 42);
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
+    thread_joinAll();
 }
 
 // Test explicit shutdown
@@ -1815,6 +1828,7 @@ unittest
     {
         assert(ex.msg == "Request timed-out");
     }
+    thread_joinAll();
 }
 
 unittest
@@ -1913,6 +1927,7 @@ unittest
     ubyte[64] val = 42;
     assert(test.getHash(val) == val[0 .. 32]);
     test.ctrl.shutdown();
+    thread_joinAll();
 }
 
 /// Test node2 responding to a dead node1
@@ -2026,6 +2041,7 @@ unittest
     // Check means the timer repeated
     assert(node.getCounter() >= 2);
     node.ctrl.shutdown();
+    thread_joinAll();
 }
 
 /// Test restarting a node
@@ -2103,5 +2119,5 @@ unittest
     node.start();
     assert(node.getValue() == 2);
     node.ctrl.shutdown();
+    thread_joinAll();
 }
-
