@@ -275,7 +275,7 @@ private bool is_main_thread;
 
 *******************************************************************************/
 
-public void runTask (scope void delegate() dg)
+public void runTask (void delegate() dg)
 {
     assert(scheduler !is null, "Cannot call this function from the main thread");
     scheduler.spawn(dg);
@@ -2084,12 +2084,15 @@ unittest
         public override void start ()
         {
             // if this is a scoped delegate, it might not have a closure,
-            // and when the task is resumed again it will segfault
+            // and when the task is resumed again it will segfault.
+            // therefore runTask() must take a non-scope delegate.
+            // note: once upstream issue #20868 is fixed, it would become
+            // a compiler error to escape a scope delegate.
             runTask(
             {
                 value = 1;
                 FiberScheduler.yield();
-                //value = 2;  // segfault
+                value = 2;
             });
         }
 
@@ -2098,6 +2101,7 @@ unittest
 
     auto node = RemoteAPI!API.spawn!Node();
     node.start();
-    assert(node.getValue() == 1);
+    assert(node.getValue() == 2);
     node.ctrl.shutdown();
 }
+
