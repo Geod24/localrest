@@ -938,6 +938,44 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         }
 }
 
+/// test runTask vs scheduleTask behavior
+unittest
+{
+    import std.stdio;
+
+    static interface API
+    {
+        public void start ();
+    }
+
+    static class Node : API
+    {
+        int[] calls;
+
+        public override void start ()
+        {
+            writefln("This: %s\n", cast(void*)this);
+
+            scheduleTask(
+            {
+                writefln("This: %s\n", cast(void*)this);
+                calls ~= 11;
+            });
+        }
+
+        ~this ()
+        {
+            printf("Node.dtor\n");
+        }
+    }
+
+    auto node = RemoteAPI!API.spawn!Node();
+    node.start();
+    node.ctrl.shutdown();
+}
+
+version (none):
+
 /// Simple usage example
 unittest
 {
@@ -2072,55 +2110,4 @@ unittest
     assert(node.getCount == [3, 2]);
     node.ctrl.shutdown();
     thread_joinAll();
-}
-
-/// test runTask vs scheduleTask behavior
-unittest
-{
-    static interface API
-    {
-        public void start ();
-        public int[] getCalls ();
-    }
-
-    static class Node : API
-    {
-        int[] calls;
-
-        public override void start ()
-        {
-            // scheduled tasks are added for later execution
-            calls ~= 1;
-            scheduleTask({ calls ~= 4; });
-
-            calls ~= 2;
-            scheduleTask({ calls ~= 5; });
-
-            // runTask schedules the task and yields the start() fiber.
-            // next in line to be called are the previous 2 scheduled tasks
-            calls ~= 3;
-            runTask({ calls ~= 6; });
-
-            // runTask schedules the task and yields start() fiber.
-            // there is only one other active task, the one which was just added
-            calls ~= 7;
-            runTask({ calls ~= 8; });
-
-            // schedule two tasks but don't yield the start() fiber
-            calls ~= 9;
-            scheduleTask({ calls ~= 11; });
-            scheduleTask({ calls ~= 12; });
-
-            // after the function exits the start() fiber is terminated and
-            // the dispatch routine will call the next two scheduled tasks
-            calls ~= 10;
-        }
-
-        public override int[] getCalls () { return calls; }
-    }
-
-    auto node = RemoteAPI!API.spawn!Node();
-    node.start();
-    assert(node.getCalls() == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
-    node.ctrl.shutdown();
 }
