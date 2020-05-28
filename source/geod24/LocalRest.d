@@ -2066,3 +2066,38 @@ unittest
     node.ctrl.shutdown();
     thread_joinAll();
 }
+
+unittest
+{
+    import geod24.concurrency;
+
+    static interface API
+    {
+        public void start ();
+        public int getValue ();
+    }
+
+    static class Node : API
+    {
+        int value;
+
+        public override void start ()
+        {
+            // if this is a scoped delegate, it might not have a closure,
+            // and when the task is resumed again it will segfault
+            runTask(
+            {
+                value = 1;
+                FiberScheduler.yield();
+                //value = 2;  // segfault
+            });
+        }
+
+        public override int getValue () { return this.value; }
+    }
+
+    auto node = RemoteAPI!API.spawn!Node();
+    node.start();
+    assert(node.getValue() == 1);
+    node.ctrl.shutdown();
+}
