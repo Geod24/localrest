@@ -932,15 +932,9 @@ protected:
         }
     }
 
-    protected class FiberCondition : Condition
+    protected class FiberCondition
     {
-        this() nothrow
-        {
-            super(null);
-            notified = false;
-        }
-
-        override void wait() nothrow
+        void wait() nothrow
         {
             scope (exit) notified = false;
 
@@ -948,7 +942,7 @@ protected:
                 FiberScheduler.yield();
         }
 
-        override bool wait(Duration period) nothrow
+        bool wait(Duration period) nothrow
         {
             import core.time : MonoTime;
 
@@ -963,13 +957,7 @@ protected:
             return notified;
         }
 
-        override void notify() nothrow
-        {
-            notified = true;
-            FiberScheduler.yield();
-        }
-
-        override void notifyAll() nothrow
+        void notify() nothrow
         {
             notified = true;
             FiberScheduler.yield();
