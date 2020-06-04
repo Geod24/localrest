@@ -549,7 +549,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                             exc.restart = e.restart;
                             throw exc;
                         },
-                        (TimeCommand s)      {
+                        (TimeCommand s) {
                             control.sleep_until = Clock.currTime + s.dur;
                             control.drop = s.drop;
                         },
