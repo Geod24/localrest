@@ -1353,7 +1353,7 @@ unittest
     for (size_t i = 0; i < 500; i++)
         n2.asyncCall();
     // Make sure we don't end up blocked forever
-    Thread.sleep(1.seconds);
+    n1.sleep(0.seconds, false);
     assert(3 == n1.call());
 
     // Debug output, uncomment if needed
