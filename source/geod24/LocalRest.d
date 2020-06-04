@@ -1619,7 +1619,6 @@ unittest
 
     assertThrown!Exception(to_node.sleepFor(2000));
     Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
-    import std.stdio;
     assert(cast(int)to_node.getFloat() == 69);
 
     to_node.ctrl.shutdown();
@@ -1836,8 +1835,6 @@ unittest
         void segfault ();
         void check ();
     }
-
-    import std.stdio;
 
     static class Node : API
     {
