@@ -1519,6 +1519,7 @@ unittest
     static interface API
     {
         size_t sleepFor (long dur);
+        void ping ();
     }
 
     static class Node : API
@@ -1528,6 +1529,8 @@ unittest
             Thread.sleep(msecs(dur));
             return 42;
         }
+
+        override void ping () { }
     }
 
     // node with no timeout
@@ -1576,7 +1579,9 @@ unittest
     assert(to_node.sleepFor(40) == 42);
 
     assertThrown!Exception(to_node.sleepFor(2000));
-    Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
+    to_node.ctrl.withTimeout(3.seconds,  // wait for the node to wake up
+          (scope API api) { api.ping(); });
+
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
     thread_joinAll();
@@ -1618,9 +1623,8 @@ unittest
     assert(to_node.sleepFor(40) == 42);
 
     assertThrown!Exception(to_node.sleepFor(2000));
-    Thread.sleep(2.seconds);  // need to wait for sleep() call to finish before calling .shutdown()
-    assert(cast(int)to_node.getFloat() == 69);
-
+    to_node.ctrl.withTimeout(3.seconds,  // wait for the node to wake up
+      (scope API api) { assert(cast(int)api.getFloat() == 69); });
     to_node.ctrl.shutdown();
     node.ctrl.shutdown();
     thread_joinAll();
