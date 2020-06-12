@@ -303,22 +303,59 @@ public void sleep (Duration timeout)
         dg = If non-null, this delegate will be called when the timer fires
         periodic = Speficies if the timer fires repeatedly or only once
 
+    Returns:
+        A `Timer` instance with the ability to control the timer
+
 *******************************************************************************/
 
-public void setTimer (Duration timeout, void delegate() dg,
+public Timer setTimer (Duration timeout, void delegate() dg,
     bool periodic = false)
 {
     assert(scheduler !is null, "Cannot call this delegate from the main thread");
     assert(dg !is null, "Cannot call this delegate if null");
-    scheduler.schedule(
-    ()
+
+    Timer timer = new Timer(timeout, dg, periodic);
+    scheduler.schedule(&timer.run);
+    return timer;
+}
+
+/// Simple timer
+public final class Timer
+{
+    private Duration timeout;
+    private void delegate () dg;
+    // Whether this timer is repeating
+    private bool periodic;
+    // Whether this timer was stopped
+    private bool stopped;
+
+    public this (Duration timeout, void delegate() dg, bool periodic)
+    {
+        this.timeout = timeout;
+        this.dg = dg;
+        this.periodic = periodic;
+        this.stopped = false;
+    }
+
+    // Run a delegate after timeout, and until this.periodic is false
+    private void run ()
     {
         do
         {
             sleep(timeout);
+            if (this.stopped)
+                return;
             dg();
-        } while (periodic);
-    });
+        } while (this.periodic);
+    }
+
+    /// Stop the timer. The next time this timer's fiber wakes up
+    /// it will exit the run() function.
+    public void stop ()
+    {
+        this.stopped = true;
+        this.periodic = false;
+    }
 }
 
 /*******************************************************************************
@@ -1985,7 +2022,7 @@ unittest
     thread_joinAll();
 }
 
-/// Test setTimer
+/// Test Timer
 unittest
 {
     static import core.thread;
@@ -1993,20 +2030,32 @@ unittest
 
     static interface API
     {
-        public void startTimer ();
+        public void startTimer (bool periodic);
+        public void stopTimer ();
         public ulong getCounter ();
+        public void resetCounter ();
     }
 
     static class Node : API
     {
-        public override void startTimer ()
+        private ulong counter;
+        private Timer timer;
+
+        public override void startTimer (bool periodic)
         {
-            setTimer(100.msecs, &callback, /* periodic: */ true);
+            this.timer = setTimer(100.msecs, &callback, periodic);
         }
 
-        public void callback () @safe
+        public override void stopTimer ()
+        {
+            this.timer.stop();
+        }
+
+        public void callback ()
         {
             this.counter++;
+            if (this.counter == 3)
+                this.timer.stop();
         }
 
         public override ulong getCounter ()
@@ -2015,16 +2064,24 @@ unittest
             return this.counter;
         }
 
-        private ulong counter;
+        public override void resetCounter ()
+        {
+            this.counter = 0;
+        }
     }
 
     auto node = RemoteAPI!API.spawn!Node();
     assert(node.getCounter() == 0);
-    node.startTimer();
+    node.startTimer(true);
     core.thread.Thread.sleep(1.seconds);
-    // The expected count is 9
-    // Check means the timer repeated
-    assert(node.getCounter() >= 2);
+    // The expected count is 3
+    // Check means the timer repeated and the timer stoped
+    assert(node.getCounter() == 3);
+    node.resetCounter();
+    node.startTimer(false);
+    node.stopTimer();
+    core.thread.Thread.sleep(500.msecs);
+    assert(node.getCounter() == 0);
     node.ctrl.shutdown();
 }
 
