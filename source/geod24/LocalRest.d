@@ -492,7 +492,9 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                 }.format(member, ovrld.mangleof));
             }
         default:
-            assert(0, "Unmatched method name: " ~ cmd.method);
+            C.trySend(cmd.sender,
+                      Response(Status.ClientFailed, cmd.id,
+                               SerializedData("Method not found")));
         }
     }
 
@@ -2188,6 +2190,36 @@ unittest
     auto node = RemoteAPI!API.spawn!Node();
     node.start();
     assert(node.getValue() == 2);
+    node.ctrl.shutdown();
+    thread_joinAll();
+}
+
+/// Situation: Calling a node with an interface that doesn't exists
+/// Expectation: The client throws an exception with a useful error message
+/// This can happen by mistake (API mixup) or when a method is optional.
+unittest
+{
+    import std.exception : assertThrown;
+
+    static interface BaseAPI
+    {
+        public int required ();
+    }
+
+    static interface APIExtended : BaseAPI
+    {
+        public int optional ();
+    }
+
+    static class BaseNode : BaseAPI
+    {
+        public override int required () { return 42; }
+    }
+
+    auto node = RemoteAPI!BaseAPI.spawn!BaseNode();
+    scope extnode = new RemoteAPI!APIExtended(node.ctrl.tid());
+    assert(extnode.required() == 42);
+    assertThrown!ClientException(extnode.optional());
     node.ctrl.shutdown();
     thread_joinAll();
 }
