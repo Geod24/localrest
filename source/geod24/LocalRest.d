@@ -161,6 +161,9 @@ private enum Status
     /// Request failed
     Failed,
 
+    /// The request failed to to a client error (4xx style error code)
+    ClientFailed,
+
     /// Request timed-out
     Timeout,
 
@@ -181,6 +184,18 @@ private struct Response
     /// If `status == Status.Success`, the serialized return value.
     /// Otherwise, it contains `Exception.toString()`.
     SerializedData data;
+}
+
+/// Thrown when the sent request is faulty (e.g. 4xx HTTP error types)
+public class ClientException : Exception
+{
+    /// Constructor
+    public this (string msg,
+        string file = __FILE__, int line = __LINE__, Exception next = null)
+        @safe pure nothrow
+    {
+        super(msg, file, line, next);
+    }
 }
 
 /// Simple wrapper to deal with tuples
@@ -466,7 +481,10 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                             res.status = Status.Success;
                         }
                         catch (Exception e)
+                        {
+                            res.status = Status.ClientFailed;
                             res.data = SerializedData(e.toString());
+                        }
                     }
 
                     C.trySend(cmd.sender, res);
@@ -948,6 +966,11 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
                     if (res.status == Status.Failed)
                         throw new Exception(res.data.get!string);
+
+                    if (res.status == Status.ClientFailed)
+                        throw new ClientException(
+                            format("Request to %s couldn't be processed : %s",
+                                   __PRETTY_FUNCTION__, res.data.get!string));
 
                     if (res.status == Status.Timeout)
                         throw new Exception("Request timed-out");
