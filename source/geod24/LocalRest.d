@@ -103,6 +103,7 @@ module geod24.LocalRest;
 
 static import C = geod24.concurrency;
 import geod24.Serialization;
+import std.format;
 import std.meta : AliasSeq;
 import std.traits : fullyQualifiedName, Parameters, ReturnType;
 
@@ -438,8 +439,6 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
     private static void handleCommand (Command cmd, API node, FilterAPI filter)
     {
-        import std.format;
-
         switch (cmd.method)
         {
             static foreach (member; __traits(allMembers, API))
@@ -798,8 +797,6 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
         public void filter (alias method, OverloadParams...) () @trusted
         {
-            import std.format;
-            import std.traits;
             enum method_name = __traits(identifier, method);
 
             // return the mangled name of the matching overload
@@ -1206,7 +1203,6 @@ unittest
 unittest
 {
     static import geod24.concurrency;
-    import std.format;
 
     __gshared C.Tid[string] tbn;
 
@@ -1293,7 +1289,6 @@ unittest
         private ulong counter;
     }
 
-    import std.format;
     auto node = RemoteAPI!API.spawn!Node();
     assert(node.getCounter() == 0);
     node.start();
