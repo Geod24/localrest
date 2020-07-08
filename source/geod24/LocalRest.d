@@ -553,19 +553,17 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         }
 
         // used for controling filtering / sleep
-        struct Control
+        static struct Control
         {
             FilterAPI filter;    // filter specific messages
             SysTime sleep_until; // sleep until this time
             bool drop;           // drop messages if sleeping
-        }
 
-        Control control;
-
-        bool isSleeping()
-        {
-            return control.sleep_until != SysTime.init
-                && Clock.currTime < control.sleep_until;
+            bool isSleeping() const
+            {
+                return this.sleep_until != SysTime.init
+                    && Clock.currTime < this.sleep_until;
+            }
         }
 
         scope exc = new ExitException();
@@ -574,6 +572,9 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         {
             scope node = new Implementation(cargs);
             scheduler = new LocalScheduler;
+
+            // Control the node behavior
+            Control control;
 
             // we need to keep track of messages which were ignored when
             // node.sleep() was used, and then handle each message in sequence.
@@ -613,21 +614,21 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                             control.filter = filter_api;
                         },
                         (Response res) {
-                            if (!isSleeping())
+                            if (!control.isSleeping())
                                 handle(res);
                             else if (!control.drop)
                                 await_msgs ~= Variant(res);
                         },
                         (Command cmd)
                         {
-                            if (!isSleeping())
+                            if (!control.isSleeping())
                                 handle(cmd);
                             else if (!control.drop)
                                 await_msgs ~= Variant(cmd);
                         });
 
                     // now handle any leftover messages after any sleep() call
-                    if (!isSleeping())
+                    if (!control.isSleeping())
                     {
                         await_msgs.each!(msg => msg.tag == 0 ? handle(msg.res) : handle(msg.cmd));
                         await_msgs.length = 0;
