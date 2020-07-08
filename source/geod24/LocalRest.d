@@ -568,16 +568,16 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                 && Clock.currTime < control.sleep_until;
         }
 
-        // we need to keep track of messages which were ignored when
-        // node.sleep() was used, and then handle each message in sequence.
-        Variant[] await_msgs;
-
         scope exc = new ExitException();
 
         void runNode ()
         {
             scope node = new Implementation(cargs);
             scheduler = new LocalScheduler;
+
+            // we need to keep track of messages which were ignored when
+            // node.sleep() was used, and then handle each message in sequence.
+            Variant[] await_msgs;
 
             void handle (T)(T arg)
             {
