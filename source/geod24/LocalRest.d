@@ -653,10 +653,11 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         catch (Throwable t)
         {
             import core.stdc.stdio, std.stdio;
-            printf("#### INTERNAL ERROR: %.*s\n", cast(int) t.msg.length, t.msg.ptr);
+            printf("#### FATAL ERROR: %.*s\n", cast(int) t.msg.length, t.msg.ptr);
             printf("This node was started at %.*s:%d\n",
                    cast(int) file.length, file.ptr, line);
-            printf("Please file a bug at https://github.com/Geod24/localrest/\n");
+            printf("This most likely means that the node crashed due to an uncaught exception\n");
+            printf("If not, please file a bug at https://github.com/Geod24/localrest/\n");
 
             try writeln("Full error: ", t);
             catch (Exception e) { /* Nothing more we can do at this point */ }
