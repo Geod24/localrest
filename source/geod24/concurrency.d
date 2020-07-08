@@ -998,10 +998,18 @@ private:
 /// Ensure argument to `start` is run first
 unittest
 {
-    scope sched = new FiberScheduler();
-    bool startHasRun;
-    sched.spawn(() => assert(startHasRun));
-    sched.start(() { startHasRun = true; });
+    {
+        scope sched = new FiberScheduler();
+        bool startHasRun;
+        sched.spawn(() => assert(startHasRun));
+        sched.start(() { startHasRun = true; });
+    }
+    {
+        scope sched = new FiberScheduler();
+        bool startHasRun;
+        sched.schedule(() => assert(startHasRun));
+        sched.start(() { startHasRun = true; });
+    }
 }
 
 /*
