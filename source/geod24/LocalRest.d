@@ -292,7 +292,7 @@ public void runTask (void delegate() dg)
 }
 
 /// Ditto
-public void sleep (Duration timeout)
+public void sleep (Duration timeout) nothrow
 {
     assert(scheduler !is null, "Cannot call this function from the main thread");
     scope cond = scheduler.new FiberCondition();
