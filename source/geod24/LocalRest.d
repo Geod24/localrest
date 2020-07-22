@@ -110,16 +110,24 @@ import std.traits : fullyQualifiedName, Parameters, ReturnType;
 import core.thread;
 import core.time;
 
+/// Request / Response ID
+private struct ID
+{
+    /// A node may restart, in which case it will spawn a new request scheduler
+    size_t sched_id;
+    /// In order to support re-entrancy, every request contains an id
+    /// which should be copied in the `Response`
+    /// Initialized to `size_t.max` so not setting it crashes the program
+    size_t id = size_t.max;
+}
 
 /// Data sent by the caller
 private struct Command
 {
     /// Tid of the sender thread (cannot be JSON serialized)
     C.Tid sender;
-    /// In order to support re-entrancy, every request contains an id
-    /// which should be copied in the `Response`
-    /// Initialized to `size_t.max` so not setting it crashes the program
-    size_t id = size_t.max;
+    /// ID used for request re-entrancy (See ID definition)
+    ID id;
     /// Method to call
     string method;
     /// Serialized arguments to the method
@@ -176,11 +184,8 @@ private struct Response
 {
     /// Final status of a request (failed, timeout, success, etc)
     Status status;
-    /// In order to support re-entrancy, every request contains an id
-    /// which should be copied in the `Response` so the scheduler can
-    /// properly dispatch this event
-    /// Initialized to `size_t.max` so not setting it crashes the program
-    size_t id;
+    /// ID used for request re-entrancy (See ID definition)
+    ID id;
     /// If `status == Status.Success`, the serialized return value.
     /// Otherwise, it contains `Exception.toString()`.
     SerializedData data;
@@ -220,16 +225,26 @@ private final class LocalScheduler : C.FiberScheduler
     private Response pending;
 
     /// Request IDs waiting for a response
-    private Waiting[ulong] waiting;
+    private Waiting[ID] waiting;
 
-    /// Get the next available request ID
-    public size_t getNextResponseId ()
+    /// scheduler ID
+    private size_t sched_id;
+
+    /// Initialize this scheduler and its unique ID
+    public this () @safe @nogc nothrow
     {
         static size_t last_idx;
-        return last_idx++;
+        this.sched_id = last_idx++;
     }
 
-    public Response waitResponse (size_t id, Duration duration) nothrow
+    /// Get the next available request ID
+    public ID getNextResponseId ()
+    {
+        static size_t last_idx;
+        return ID(this.sched_id, last_idx++);
+    }
+
+    public Response waitResponse (ID id, Duration duration) nothrow
     {
         if (id !in this.waiting)
             this.waiting[id] = Waiting(new FiberCondition, false);
@@ -253,7 +268,7 @@ private final class LocalScheduler : C.FiberScheduler
     }
 
     /// Called when a waiting condition was handled and can be safely removed
-    public void remove (size_t id)
+    public void remove (ID id)
     {
         this.waiting.remove(id);
     }
@@ -588,6 +603,10 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                 }
                 else static if (is(T == Response))
                 {
+                    // response for a previous LocalScheduler instance
+                    if (arg.id.sched_id != scheduler.sched_id)
+                        return;
+
                     scheduler.pending = arg;
                     scheduler.waiting[arg.id].c.notify();
                     scheduler.remove(arg.id);
@@ -2154,6 +2173,67 @@ unittest
     node.ctrl.restart();
     assert(node.getCount == [3, 2]);
     node.ctrl.shutdown();
+    thread_joinAll();
+}
+
+/// Test restarting a node that has responses waiting for it
+unittest
+{
+    import core.atomic : atomicLoad, atomicStore;
+    static interface API
+    {
+        @safe:
+        public void call0 ();
+        public void call1 ();
+    }
+
+    __gshared C.Tid node2Addr;
+    static shared bool done;
+
+    static class Node : API
+    {
+        @trusted:
+
+        public override void call0 ()
+        {
+            scope node2 = new RemoteAPI!API(node2Addr);
+            node2.call1();
+        }
+
+        public override void call1 ()
+        {
+            // when this event runs we know call1() has already returned
+            scheduler.schedule({ atomicStore(done, true); });
+        }
+    }
+
+    auto node1 = RemoteAPI!API.spawn!Node(500.msecs);
+    auto node2 = RemoteAPI!API.spawn!Node();
+    node2Addr = node2.ctrl.tid();
+    node2.ctrl.sleep(2.seconds, false);
+
+    try
+    {
+        node1.call0();
+        assert(0, "This should have timed out");
+    }
+    catch (Exception e) {}
+
+    node1.ctrl.restart();
+
+    // after a while node 1 will receive a response to the timed-out request
+    // to call1(), but the node restarted and is no longer interested in this
+    // request (the request map / LocalScheduler is different), so it's filtered
+    size_t count;
+    while (!atomicLoad(done))
+    {
+        assert(count < 300);  // up to 3 seconds wait
+        count++;
+        Thread.sleep(10.msecs);
+    }
+
+    node1.ctrl.shutdown();
+    node2.ctrl.shutdown();
     thread_joinAll();
 }
 
