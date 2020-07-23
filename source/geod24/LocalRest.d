@@ -1439,7 +1439,10 @@ unittest
 
     // Now drop many messages
     n1.sleep(1.seconds, true);
-    for (size_t i = 0; i < 500; i++)
+    // Github Action runs out of memory with MessageCount == 500
+    version (Windows) enum MessageCount = 100;
+    else              enum MessageCount = 500;
+    for (size_t i = 0; i < MessageCount; i++)
         n2.asyncCall();
     // Make sure we don't end up blocked forever
     n1.sleep(0.seconds, false);
