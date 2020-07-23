@@ -103,6 +103,7 @@ module geod24.LocalRest;
 
 static import C = geod24.concurrency;
 import geod24.Serialization;
+import std.datetime.systime : Clock, SysTime;
 import std.format;
 import std.meta : AliasSeq;
 import std.traits : fullyQualifiedName, Parameters, ReturnType;
@@ -200,6 +201,58 @@ public class ClientException : Exception
         @safe pure nothrow
     {
         super(msg, file, line, next);
+    }
+}
+
+/// Simple exception unwind the stack when we need to terminate/restart,
+/// used by `spawn` but kept here as it doesn't depend on template parameters.
+private final class ExitException : Exception
+{
+    public bool restart;
+
+    this () @safe pure nothrow @nogc
+    {
+        super("You should never see this exception - please report a bug");
+    }
+}
+
+/// Wrapper for data inside of `spawn`, kept here as it doesn't
+/// depend on template parameters
+private struct Variant
+{
+    pure nothrow @nogc:
+
+    public this (Response res) @trusted
+    {
+        this.res = res;
+        this.tag = 0;
+    }
+    public this (Command cmd) @trusted
+    {
+        this.cmd = cmd;
+        this.tag = 1;
+    }
+
+    union
+    {
+        Response res;
+        Command cmd;
+    }
+
+    public ubyte tag;
+}
+
+/// Used by `spawn` for recording current filtering / sleeping setting
+private struct Control
+{
+    public FilterAPI filter;    // filter specific messages
+    public SysTime sleep_until; // sleep until this time
+    public bool drop;           // drop messages if sleeping
+
+    public bool isSleeping() const @safe /* nothrow: Not on Windows (currTime) */
+    {
+        return this.sleep_until != SysTime.init
+            && Clock.currTime < this.sleep_until;
     }
 }
 
@@ -536,50 +589,8 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         C.Tid self, string file, int line, CtorParams!Implementation cargs)
         nothrow
     {
-        import std.datetime.systime : Clock, SysTime;
         import std.algorithm : each;
         import std.range;
-
-        /// Simple exception unwind the stack when we need to terminate/restart
-        static final class ExitException : Exception
-        {
-            bool restart;
-
-            this () @safe pure nothrow @nogc
-            {
-                super("You should never see this exception - please report a bug");
-            }
-        }
-
-        // very simple & limited variant, to keep it performant.
-        // should be replaced by a real Variant later
-        static struct Variant
-        {
-            this (Response res) { this.res = res; this.tag = 0; }
-            this (Command cmd) { this.cmd = cmd; this.tag = 1; }
-
-            union
-            {
-                Response res;
-                Command cmd;
-            }
-
-            ubyte tag;
-        }
-
-        // used for controling filtering / sleep
-        static struct Control
-        {
-            FilterAPI filter;    // filter specific messages
-            SysTime sleep_until; // sleep until this time
-            bool drop;           // drop messages if sleeping
-
-            bool isSleeping() const
-            {
-                return this.sleep_until != SysTime.init
-                    && Clock.currTime < this.sleep_until;
-            }
-        }
 
         scope exc = new ExitException();
 
