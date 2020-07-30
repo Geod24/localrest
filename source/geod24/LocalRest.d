@@ -59,6 +59,12 @@
     might be processed / send by the node until the request is actually processed.
     There is also a `restart` method which accepts the same callback argument.
 
+    Inject:
+    The control interface has an `inject` method which can be used for
+    dependency & code injection. It takes a single function pointer which will
+    be passed the instance of the node. The function will be called
+    asynchronously in the context of the Node's thread.
+
     Event_Loop:
     Server process usually needs to perform some action in an asynchronous way.
     Additionally, some actions needs to be completed at a semi-regular interval,
@@ -141,6 +147,13 @@ private struct TimeCommand
     Duration dur;
     /// Whether or not affected messages should be dropped
     bool drop = false;
+}
+
+/// Used for dependency & code injection
+private struct InjectionCommand (API)
+{
+    /// Callback that will be passed the Node instance
+    void function (API) callback;
 }
 
 /// Ask the node to shut down
@@ -625,6 +638,10 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                             exc.restart = e.restart;
                             throw exc;
                         },
+                        (InjectionCommand!API e)
+                        {
+                            e.callback(node);
+                        },
                         (TimeCommand s) {
                             control.sleep_until = Clock.currTime + s.dur;
                             control.drop = s.drop;
@@ -740,6 +757,22 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         public C.Tid tid () @nogc pure nothrow
         {
             return this.childTid;
+        }
+
+        /***********************************************************************
+
+            Used for dependency & code injection.
+            Note that this call is asynchronous and runs in the thread of
+            the Node.
+
+            Params:
+                callback = Will be called in the context of the Node thread
+
+        ***********************************************************************/
+
+        public void inject (void function (API) callback)
+        {
+            C.send(this.childTid, InjectionCommand!API(callback));
         }
 
         /***********************************************************************
@@ -2303,5 +2336,33 @@ unittest
     assert(extnode.required() == 42);
     assertThrown!ClientException(extnode.optional());
     node.ctrl.shutdown();
+    thread_joinAll();
+}
+
+/// Dependency injection example
+unittest
+{
+    static interface API
+    {
+        @safe:
+
+        public void accumulate (int);
+    }
+
+    static class Node : API
+    {
+        private int sum;
+
+        @safe:
+
+        public override void accumulate (int val) { this.sum += val; }
+    }
+
+    scope test = RemoteAPI!API.spawn!Node();
+    test.accumulate(1);
+    test.accumulate(10);
+
+    test.ctrl.inject(node => assert((cast(Node)node).sum == 11));
+    test.ctrl.shutdown();
     thread_joinAll();
 }
