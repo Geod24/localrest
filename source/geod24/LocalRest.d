@@ -334,7 +334,7 @@ public void sleep (Duration timeout) nothrow
 *******************************************************************************/
 
 public Timer setTimer (Duration timeout, void delegate() dg,
-    bool periodic = false)
+    bool periodic = false) nothrow
 {
     assert(scheduler !is null, "Cannot call this delegate from the main thread");
     assert(dg !is null, "Cannot call this delegate if null");
@@ -354,7 +354,7 @@ public final class Timer
     // Whether this timer was stopped
     private bool stopped;
 
-    public this (Duration timeout, void delegate() dg, bool periodic)
+    public this (Duration timeout, void delegate() dg, bool periodic) @safe nothrow
     {
         this.timeout = timeout;
         this.dg = dg;
@@ -376,7 +376,7 @@ public final class Timer
 
     /// Stop the timer. The next time this timer's fiber wakes up
     /// it will exit the run() function.
-    public void stop ()
+    public void stop () @safe nothrow
     {
         this.stopped = true;
         this.periodic = false;
