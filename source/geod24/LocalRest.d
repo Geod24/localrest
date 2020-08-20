@@ -300,7 +300,7 @@ private bool is_main_thread;
 
 *******************************************************************************/
 
-public void runTask (void delegate() dg)
+public void runTask (void delegate() dg) nothrow
 {
     assert(scheduler !is null, "Cannot call this function from the main thread");
     scheduler.spawn(dg);
