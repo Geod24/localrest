@@ -926,7 +926,7 @@ protected:
     {
         ThreadInfo info;
 
-        this(void delegate() op, size_t sz = 16 * 1024 * 1024) nothrow
+        this(void delegate() op, size_t sz = 512 * 1024) nothrow
         {
             super(op, sz);
         }
