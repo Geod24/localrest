@@ -925,6 +925,7 @@ protected:
     static class InfoFiber : Fiber
     {
         ThreadInfo info;
+        FiberCondition cond;
 
         this(void delegate() op, size_t sz = 512 * 1024) nothrow
         {
@@ -934,26 +935,30 @@ protected:
 
     protected class FiberCondition
     {
+        MonoTime limit = MonoTime.init;
+
+        private void registerToInfoFiber(InfoFiber info_fiber = cast(InfoFiber) Fiber.getThis()) nothrow
+        {
+            assert(info_fiber !is null, "This Fiber does not belong to FiberScheduler");
+            assert(info_fiber.sem is null, "This Fiber already has a registered FiberBinarySemaphore");
+            info_fiber.sem = this;
+        }
+
         void wait() nothrow
         {
+            this.registerToInfoFiber();
+            FiberScheduler.yield();
             scope (exit) notified = false;
-
-            while (!notified)
-                FiberScheduler.yield();
         }
 
         bool wait(Duration period) nothrow
         {
-            import core.time : MonoTime;
+            this.registerToInfoFiber();
+            limit = MonoTime.currTime + period;
+            FiberScheduler.yield();
+            limit = MonoTime.init;
 
             scope (exit) notified = false;
-
-            for (auto limit = MonoTime.currTime + period;
-                 !notified && !period.isNegative;
-                 period = limit - MonoTime.currTime)
-            {
-                FiberScheduler.yield();
-            }
             return notified;
         }
 
@@ -970,9 +975,28 @@ private:
     void dispatch()
     {
         import std.algorithm.mutation : remove;
-
         while (m_fibers.length > 0)
         {
+            // Is Fiber waiting on a FiberCondition?
+            if (m_fibers[m_pos].cond !is null)
+            {
+                // Is condition met?
+                // TRUE: Clear the condition and schedule the fiber
+                // FALSE: Skip it
+                if (m_fibers[m_pos].cond.notified ||
+                    (m_fibers[m_pos].cond.limit != MonoTime.init
+                        && MonoTime.currTime >= m_fibers[m_pos].cond.limit) )
+                {
+                    m_fibers[m_pos].cond = null;
+                }
+                else
+                {
+                    if (m_pos++ >= m_fibers.length - 1)
+                        m_pos = 0;
+                    continue;
+                }
+            }
+
             auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
             if (t !is null)
             {
@@ -991,7 +1015,7 @@ private:
     }
 
 private:
-    Fiber[] m_fibers;
+    InfoFiber[] m_fibers;
     size_t m_pos;
 }
 
