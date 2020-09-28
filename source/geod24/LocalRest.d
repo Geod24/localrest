@@ -218,8 +218,8 @@ private final class LocalScheduler : C.FiberScheduler
     import core.sync.condition;
     import core.sync.mutex;
 
-    /// Just a FiberCondition with a state
-    private struct Waiting { FiberCondition c; bool busy; }
+    /// Just a FiberBinarySemaphore with a state
+    private struct Waiting { FiberBinarySemaphore s; bool busy; }
 
     /// The 'Response' we are currently processing, if any
     private Response pending;
@@ -247,7 +247,7 @@ private final class LocalScheduler : C.FiberScheduler
     public Response waitResponse (ID id, Duration duration) nothrow
     {
         if (id !in this.waiting)
-            this.waiting[id] = Waiting(new FiberCondition, false);
+            this.waiting[id] = Waiting(new FiberBinarySemaphore, false);
 
         Waiting* ptr = &this.waiting[id];
         if (ptr.busy)
@@ -257,8 +257,8 @@ private final class LocalScheduler : C.FiberScheduler
         ptr.busy = true;
 
         if (duration == Duration.init)
-            ptr.c.wait();
-        else if (!ptr.c.wait(duration))
+            ptr.s.wait();
+        else if (!ptr.s.wait(duration))
             this.pending = Response(Status.Timeout, this.pending.id);
 
         ptr.busy = false;
@@ -310,8 +310,8 @@ public void runTask (void delegate() dg) nothrow
 public void sleep (Duration timeout) nothrow
 {
     assert(scheduler !is null, "Cannot call this function from the main thread");
-    scope cond = scheduler.new FiberCondition();
-    cond.wait(timeout);
+    scope sem = scheduler.new FiberBinarySemaphore();
+    sem.wait(timeout);
 }
 
 /*******************************************************************************
@@ -608,7 +608,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                         return;
 
                     scheduler.pending = arg;
-                    scheduler.waiting[arg.id].c.notify();
+                    scheduler.waiting[arg.id].s.notify();
                     scheduler.remove(arg.id);
                 }
                 else static assert(0, "Unhandled type: " ~ T.stringof);
@@ -967,7 +967,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                                     C.receiveTimeout(C.thisTid(), 10.msecs,
                                         (Response res) {
                                             scheduler.pending = res;
-                                            scheduler.waiting[res.id].c.notify();
+                                            scheduler.waiting[res.id].s.notify();
                                         });
 
                                     scheduler.yield();

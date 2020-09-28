@@ -925,7 +925,9 @@ protected:
     static class InfoFiber : Fiber
     {
         ThreadInfo info;
-        FiberCondition cond;
+
+        /// Semaphore reference that this Fiber is blocked on
+        FiberBinarySemaphore sem;
 
         this(void delegate() op, size_t sz = 512 * 1024) nothrow
         {
@@ -933,42 +935,76 @@ protected:
         }
     }
 
-    protected class FiberCondition
+    protected class FiberBinarySemaphore
     {
-        MonoTime limit = MonoTime.init;
+
+        /***********************************************************************
+
+            Associate `FiberBinarySemaphore` with the running `Fiber`
+
+            `FiberScheduler` will check to see if the `Fiber` is blocking on a
+            `FiberBinarySemaphore` to avoid rescheduling it unnecessarily
+
+        ***********************************************************************/
 
         private void registerToInfoFiber(InfoFiber info_fiber = cast(InfoFiber) Fiber.getThis()) nothrow
         {
             assert(info_fiber !is null, "This Fiber does not belong to FiberScheduler");
             assert(info_fiber.sem is null, "This Fiber already has a registered FiberBinarySemaphore");
             info_fiber.sem = this;
+
         }
 
         void wait() nothrow
         {
             this.registerToInfoFiber();
             FiberScheduler.yield();
-            scope (exit) notified = false;
+            scope (exit) this.notified = false;
         }
 
         bool wait(Duration period) nothrow
         {
             this.registerToInfoFiber();
-            limit = MonoTime.currTime + period;
+            this.limit = MonoTime.currTime + period;
             FiberScheduler.yield();
-            limit = MonoTime.init;
 
-            scope (exit) notified = false;
-            return notified;
+            scope (exit)
+            {
+                this.limit = MonoTime.init;
+                this.notified = false;
+            }
+            return this.notified;
         }
 
         void notify() nothrow
         {
-            notified = true;
+            this.notified = true;
             FiberScheduler.yield();
         }
 
-        private bool notified;
+        /***********************************************************************
+
+            Query if `FiberBinarySemaphore` should still block
+
+            FiberBinarySemaphore will block the Fiber until it is notified or
+            the specified timeout is reached.
+
+        ***********************************************************************/
+
+        bool shouldBlock() nothrow
+        {
+            bool timed_out = (limit != MonoTime.init
+                                && MonoTime.currTime >= limit);
+
+            return !timed_out && !notified;
+        }
+
+    private:
+        /// Time limit that will eventually unblock the caller if a timeout is specified
+        MonoTime limit = MonoTime.init;
+
+        /// State of the semaphore
+        bool notified;
     }
 
 private:
@@ -977,23 +1013,21 @@ private:
         import std.algorithm.mutation : remove;
         while (m_fibers.length > 0)
         {
-            // Is Fiber waiting on a FiberCondition?
-            if (m_fibers[m_pos].cond !is null)
+            // Is Fiber waiting on a FiberBinarySemaphore?
+            if (auto sem = m_fibers[m_pos].sem)
             {
                 // Is condition met?
-                // TRUE: Clear the condition and schedule the fiber
+                // TRUE: Clear the sem and schedule the fiber
                 // FALSE: Skip it
-                if (m_fibers[m_pos].cond.notified ||
-                    (m_fibers[m_pos].cond.limit != MonoTime.init
-                        && MonoTime.currTime >= m_fibers[m_pos].cond.limit) )
-                {
-                    m_fibers[m_pos].cond = null;
-                }
-                else
+                if (sem.shouldBlock())
                 {
                     if (m_pos++ >= m_fibers.length - 1)
                         m_pos = 0;
                     continue;
+                }
+                else
+                {
+                    m_fibers[m_pos].sem = null;
                 }
             }
 
