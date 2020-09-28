@@ -831,8 +831,7 @@ class FiberScheduler
     {
         create(op);
         // Make sure the just-created fiber is run first
-        this.m_pos = this.m_fibers.length - 1;
-        dispatch();
+        dispatch(this.m_fibers.length - 1);
     }
 
     /**
@@ -1008,49 +1007,61 @@ protected:
     }
 
 private:
-    void dispatch()
+
+    /***********************************************************************
+
+        Start the scheduling loop
+
+        Param:
+            pos = m_fibers index of the Fiber to execute first
+
+    ***********************************************************************/
+
+    void dispatch(size_t pos = 0)
     {
         import std.algorithm.mutation : remove;
+
+        assert(pos < m_fibers.length);
         while (m_fibers.length > 0)
         {
             // Is Fiber waiting on a FiberBinarySemaphore?
-            if (auto sem = m_fibers[m_pos].sem)
+            if (auto sem = m_fibers[pos].sem)
             {
                 // Is condition met?
                 // TRUE: Clear the sem and schedule the fiber
                 // FALSE: Skip it
                 if (sem.shouldBlock())
                 {
-                    if (m_pos++ >= m_fibers.length - 1)
-                        m_pos = 0;
+                    if (pos++ >= m_fibers.length - 1)
+                        pos = 0;
                     continue;
                 }
                 else
                 {
-                    m_fibers[m_pos].sem = null;
+                    m_fibers[pos].sem = null;
                 }
             }
 
-            auto t = m_fibers[m_pos].call(Fiber.Rethrow.no);
+            auto t = m_fibers[pos].call(Fiber.Rethrow.no);
             if (t !is null)
             {
                 throw t;
             }
-            if (m_fibers[m_pos].state == Fiber.State.TERM)
+            if (m_fibers[pos].state == Fiber.State.TERM)
             {
-                if (m_pos >= (m_fibers = remove(m_fibers, m_pos)).length)
-                    m_pos = 0;
+                if (pos >= (m_fibers = remove(m_fibers, pos)).length)
+                    pos = 0;
             }
-            else if (m_pos++ >= m_fibers.length - 1)
+            else if (pos++ >= m_fibers.length - 1)
             {
-                m_pos = 0;
+                pos = 0;
             }
         }
     }
 
 private:
+    /// List of `InfoFiber`s currently in the system
     InfoFiber[] m_fibers;
-    size_t m_pos;
 }
 
 /// Ensure argument to `start` is run first
