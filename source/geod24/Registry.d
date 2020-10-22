@@ -15,8 +15,8 @@ import geod24.concurrency;
 /// Ditto
 public shared struct Registry
 {
-    private Tid[string] tidByName;
-    private string[][Tid] namesByTid;
+    private Object[string] objectByName;
+    private string[][Object] namesByObject;
     private Mutex registryLock;
 
     /// Initialize this registry, creating the Mutex
@@ -26,21 +26,21 @@ public shared struct Registry
     }
 
     /**
-     * Gets the Tid associated with name.
+     * Gets the Object associated with name.
      *
      * Params:
      *  name = The name to locate within the registry.
      *
      * Returns:
-     *  The associated Tid or Tid.init if name is not registered.
+     *  The associated Object or Object.init if name is not registered.
      */
-    Tid locate(string name)
+    Object locate(string name)
     {
         synchronized (registryLock)
         {
-            if (shared(Tid)* tid = name in this.tidByName)
-                return *cast(Tid*)tid;
-            return Tid.init;
+            if (shared(Object)* obj = name in this.objectByName)
+                return *cast(Object*)obj;
+            return null;
         }
     }
 
@@ -59,16 +59,14 @@ public shared struct Registry
      *  true if the name is available and tid is not known to represent a
      *  defunct thread.
      */
-    bool register(string name, Tid tid)
+    bool register(string name, Object obj)
     {
         synchronized (registryLock)
         {
-            if (name in tidByName)
+            if (name in objectByName)
                 return false;
-            if (tid.mbox.isClosed)
-                return false;
-            this.namesByTid[tid] ~= name;
-            this.tidByName[name] = cast(shared)tid;
+            this.namesByObject[obj] ~= name;
+            this.objectByName[name] = cast(shared)obj;
             return true;
         }
     }
@@ -89,12 +87,12 @@ public shared struct Registry
 
         synchronized (registryLock)
         {
-            if (shared(Tid)* tid = name in this.tidByName)
+            if (shared(Object)* obj = name in this.objectByName)
             {
-                auto allNames = *cast(Tid*)tid in this.namesByTid;
+                auto allNames = *cast(Object*)obj in this.namesByObject;
                 auto pos = countUntil(*allNames, name);
                 remove!(SwapStrategy.unstable)(*allNames, pos);
-                this.tidByName.remove(name);
+                this.objectByName.remove(name);
                 return true;
             }
             return false;
