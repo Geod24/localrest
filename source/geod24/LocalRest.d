@@ -1893,6 +1893,7 @@ unittest
     auto node = RemoteAPI!API.spawn!Node(1.seconds);
     assert(node.myping(42) == 42);
     node.ctrl.shutdown();
+    thread_joinAll();
 
     try
     {
@@ -1901,9 +1902,8 @@ unittest
     }
     catch (Exception ex)
     {
-        assert(ex.msg == "Request timed-out");
+        assert(ex.msg == "Connection with peer closed");
     }
-    thread_joinAll();
 }
 
 unittest
