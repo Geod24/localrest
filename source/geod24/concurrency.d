@@ -46,6 +46,7 @@ import core.time : MonoTime;
 import std.range.primitives;
 import std.traits;
 import std.algorithm;
+import std.typecons;
 import std.container : DList;
 
 ///
@@ -1499,6 +1500,176 @@ private:
 
 /***********************************************************************
 
+    A common interface for objects that can be used in `select()`
+
+***********************************************************************/
+
+public interface Selectable
+{
+    /***********************************************************************
+
+        Try to read/write to the `Selectable` without blocking. If the
+        operation would block, queue and link it with the `sel_state`
+
+        Params:
+            ptr = pointer to the data for the select operation
+            sel_state = SelectState instace of the select call being executed
+            sel_id = id of the select call being executed
+
+    ***********************************************************************/
+
+    void selectWrite (void* ptr, SelectState sel_state, int sel_id);
+
+    /// Ditto
+    void selectRead (void* ptr, SelectState sel_state, int sel_id);
+}
+
+/***********************************************************************
+
+    An aggregate to hold neccessary information for a select operation
+
+***********************************************************************/
+
+public struct SelectEntry
+{
+    /// Reference to a Selectable object
+    Selectable selectable;
+
+    /// Pointer to the select data
+    void* select_data;
+
+    /***********************************************************************
+
+        Default ctor
+
+        Params:
+            selectable = A selectable interface reference
+            select_data = pointer to the data for the select operation
+
+    ***********************************************************************/
+
+    this (Selectable selectable, void* select_data) @safe pure nothrow @nogc
+    {
+        this.selectable = selectable;
+        this.select_data = select_data;
+    }
+}
+
+/// Consists of the id and result of the select operation that was completed
+public alias SelectReturn = Tuple!(bool, "success", int, "id");
+
+/***********************************************************************
+
+    Block on multiple `Channel`s
+
+    Only one operation is completed per `select()` call
+
+    Params:
+        read_list = List of `Channel`s to select for read operation
+        write_list = List of `Channel`s to select for write operation
+
+    Return:
+        Returns success/failure status of the operation and the index
+        of the `Channel` that the operation was carried on. The index is
+        the position of the SelectEntry in `read_list ~ write_list`, ie
+        concatenated lists.
+
+***********************************************************************/
+
+public SelectReturn select (ref SelectEntry[] read_list, ref SelectEntry[] write_list)
+{
+    auto ss = new SelectState();
+    int sel_id = 0;
+
+    foreach(ref entry; read_list)
+    {
+        entry.selectable.selectRead(entry.select_data, ss, sel_id++);
+    }
+
+    foreach(ref entry; write_list)
+    {
+        entry.selectable.selectWrite(entry.select_data, ss, sel_id++);
+    }
+
+    ss.sem.wait();
+
+    return SelectReturn(ss.success, ss.id);
+}
+
+/***********************************************************************
+
+    Holds the state of a group of `selectRead`/`selectWrite` calls.
+    Synchronizes peers that will consume those calls, so that only one
+    `selectRead`/`selectWrite` call is completed.
+
+***********************************************************************/
+
+final private class SelectState
+{
+    /// Shared semaphore object for multiple ChannelQueueEntry objects
+    FiberScheduler.FiberBinarySemaphore sem;
+
+    /***********************************************************************
+
+        Default constructor
+
+    ***********************************************************************/
+
+    this () nothrow
+    {
+        this.sem = thisScheduler().new FiberBinarySemaphore();
+    }
+
+    /***********************************************************************
+
+        Tries to atomically consume a `SelectState` and sets `id` and `success`
+        fields
+
+        Param:
+            id = ID of the `selectRead`/`selectWrite` call that is consuming
+                 this `SelectState`
+            success_in = Success/Failure of the select call
+
+        Return:
+            Returns true if `SelectState` was not already consumed, false otherwise
+
+    ***********************************************************************/
+
+    bool tryConsume (int id, bool success_in = true) nothrow
+    {
+        if (cas(&this.consumed, false, true))
+        {
+            this.id = id;
+            this.success = success_in;
+            return true;
+        }
+        return false;
+    }
+
+    /***********************************************************************
+
+        Returns if `SelectState` is already consumed or not
+
+    ***********************************************************************/
+
+    bool isConsumed () nothrow
+    {
+        return atomicLoad(this.consumed);
+    }
+
+    /// ID of the select call that consumed this `SelectState`
+    int id;
+
+    /// Success/failure state of the select call with ID of `id`
+    bool success;
+
+private:
+    /// Indicates if this `SelectState` is consumed or not
+    shared(bool) consumed;
+}
+
+/***********************************************************************
+
     A golang style channel implementation with buffered and unbuffered
     operation modes
 
@@ -1510,7 +1681,7 @@ private:
 
 ***********************************************************************/
 
-final public class Channel (T)
+final public class Channel (T) : Selectable
 {
     /***********************************************************************
 
@@ -1590,22 +1761,30 @@ final public class Channel (T)
 
         tryWrite writes a message if it is possible to do so without blocking.
 
+        If the tryWrite is being executed in a select call, it tries to consume the
+        `caller_sel` with the given `caller_sel_id`. It only proceeds if it can
+        successfully consume the `caller_sel`
+
         Param:
             val = Message to write to `Channel`
+            caller_sel = SelectState instace of the select call being executed
+            caller_sel_id = id of the select call being executed
 
         Returns:
             Success/Failure
 
     ***********************************************************************/
 
-    private bool tryWrite () (auto ref T val) nothrow
+    private bool tryWrite () (auto ref T val, SelectState caller_sel = null, int caller_sel_id = 0) nothrow
     {
         if (this.closed)
         {
+            if (caller_sel)
+                caller_sel.tryConsume(caller_sel_id, false);
             return false;
         }
 
-        if (ChannelQueueEntry readq_ent = this.dequeueEntry(this.readq))
+        if (ChannelQueueEntry readq_ent = this.dequeueEntry(this.readq, caller_sel, caller_sel_id))
         {
             *readq_ent.pVal = val;
             readq_ent.sem.notify();
@@ -1613,13 +1792,48 @@ final public class Channel (T)
         }
 
         if (this.max_size > 0 // this.max_size > 0 = buffered
-                    && this.buffer.length < this.max_size)
+                    && this.buffer.length < this.max_size
+                    && (!caller_sel || caller_sel.tryConsume(caller_sel_id)))
         {
             this.buffer ~= val;
             return true;
         }
 
         return false;
+    }
+
+    /***********************************************************************
+
+        Try to write a message to Channel without blocking and if it fails,
+        create a write queue entry using the given `sel_state` and `sel_id`
+
+        Param:
+            ptr = Message to write to channel
+            sel_state = SelectState instace of the select call being executed
+            sel_id = id of the select call being executed
+
+    ***********************************************************************/
+
+    void selectWrite (void* ptr, SelectState sel_state, int sel_id) nothrow
+    {
+        assert(ptr !is null);
+        assert(sel_state !is null);
+        T* val = cast(T*) ptr;
+
+        this.lock.lock_nothrow();
+
+        bool success = tryWrite(*val, sel_state, sel_id);
+
+        if (!sel_state.isConsumed())
+            this.enqueueEntry(this.writeq, val, sel_state, sel_id);
+
+        if (success || this.closed || sel_state.id == -1)
+        {
+            this.lock.unlock_nothrow();
+            sel_state.sem.notify();
+        }
+        else
+            this.lock.unlock_nothrow();
     }
 
     /***********************************************************************
@@ -1679,40 +1893,92 @@ final public class Channel (T)
 
         tryRead reads a message if it is possible to do so without blocking.
 
+        If the tryRead is being executed in a select call, it tries to consume the
+        `caller_sel` with the given `caller_sel_id`. It only proceeds if it can
+        successfully consume the `caller_sel`
+
         Param:
             output = Field to write the message to
+            caller_sel = SelectState instace of the select call being executed
+            caller_sel_id = id of the select call being executed\
 
         Returns:
             Success/Failure
 
     ***********************************************************************/
 
-    private bool tryRead (ref T output) nothrow
+    private bool tryRead (ref T output, SelectState caller_sel = null, int caller_sel_id = 0) nothrow
     {
-        ChannelQueueEntry write_ent = this.dequeueEntry(this.writeq);
+        ChannelQueueEntry write_ent = this.dequeueEntry(this.writeq, caller_sel, caller_sel_id);
 
         if (this.buffer.length > 0)
         {
-            output = this.buffer[0];
-            this.buffer = this.buffer.remove(0);
-
-            if (write_ent)
+            // if dequeueEntry fails, we will try to consume caller_sel again.
+            if (!caller_sel || write_ent || caller_sel.tryConsume(caller_sel_id))
             {
-                this.buffer ~= *write_ent.pVal;
+                output = this.buffer.front();
+                this.buffer.popFront();
+
+                if (write_ent)
+                {
+                    this.buffer ~= *write_ent.pVal;
+                }
+            }
+            else
+            {
+                return false;
             }
         }
+        // if dequeueEntry returns a valid entry, it always successfully consumes the related select states.
+        // the race between 2 select calls is resolved in dequeueEntry.
         else if (write_ent)
         {
             output = *write_ent.pVal;
         }
         else
         {
+            if (this.closed && caller_sel)
+                caller_sel.tryConsume(caller_sel_id, false);
             return false;
         }
 
         if (write_ent)
             write_ent.sem.notify();
         return true;
+    }
+
+    /***********************************************************************
+
+        Try to read a message from Channel without blocking and if it fails,
+        create a read queue entry using the given `sel_state` and `sel_id`
+
+        Param:
+            ptr = Buffer to write the message to
+            sel_state = SelectState instace of the select call being executed
+            sel_id = id of the select call being executed
+
+    ***********************************************************************/
+
+    void selectRead (void* ptr, SelectState sel_state, int sel_id) nothrow
+    {
+        assert(ptr !is null);
+        assert(sel_state !is null);
+        T* val = cast(T*) ptr;
+
+        this.lock.lock_nothrow();
+
+        bool success = tryRead(*val, sel_state, sel_id);
+
+        if (!sel_state.isConsumed())
+            this.enqueueEntry(this.readq, val, sel_state, sel_id);
+
+        if (success || this.closed || sel_state.id == -1)
+        {
+            this.lock.unlock_nothrow();
+            sel_state.sem.notify();
+        }
+        else
+            this.lock.unlock_nothrow();
     }
 
     /***********************************************************************
@@ -1791,10 +2057,22 @@ final public class Channel (T)
         /// Result of the blocking read/write call
         bool success = true;
 
-        this (T* pVal) nothrow
+        /// State of the select call that this entry was created for
+        SelectState select_state;
+
+        /// Id of the select call that this entry was created for
+        int sel_id;
+
+        this (T* pVal, SelectState select_state = null, int sel_id = 0) nothrow
         {
             this.pVal = pVal;
-            this.sem = thisScheduler().new FiberBinarySemaphore();
+            this.select_state = select_state;
+            this.sel_id = sel_id;
+
+            if (this.select_state)
+                this.sem = this.select_state.sem;
+            else
+                this.sem = thisScheduler().new FiberBinarySemaphore();
         }
 
         /***********************************************************************
@@ -1810,7 +2088,8 @@ final public class Channel (T)
         void terminate () nothrow
         {
             this.success = false;
-            this.sem.notify();
+            if (!this.select_state || this.select_state.tryConsume(this.sel_id, this.success))
+                this.sem.notify();
         }
     }
 
@@ -1821,17 +2100,21 @@ final public class Channel (T)
         Param:
             entryq = Queue to append the new ChannelQueueEntry
             pVal =  Pointer to the message buffer
+            sel_state = SelectState object to associate with the
+                        newly created ChannelQueueEntry
+            sel_id = id of the select call creating the new ChannelQueueEntry
 
         Return:
             newly created ChannelQueueEntry
 
     ***********************************************************************/
 
-    private ChannelQueueEntry enqueueEntry (ref DList!ChannelQueueEntry entryq, T* pVal) nothrow
+    private ChannelQueueEntry enqueueEntry (ref DList!ChannelQueueEntry entryq, T* pVal,
+                                            SelectState sel_state = null, int sel_id = 0) nothrow
     {
         assert(pVal !is null);
 
-        ChannelQueueEntry q_ent = new ChannelQueueEntry(pVal);
+        ChannelQueueEntry q_ent = new ChannelQueueEntry(pVal, sel_state, sel_id);
         entryq.insert(q_ent);
 
         return q_ent;
@@ -1841,21 +2124,64 @@ final public class Channel (T)
 
         Dequeue a `ChannelQueueEntry` from the given `entryq`
 
+        Walks the `entryq` until it finds a suitable entry or the queue
+        empties. If `dequeueEntry` is called from a select, it tries to
+        consume the `caller_sel` if the `peer_sel` is not currently consumed.
+        If it fails to consume the `caller_sel`, returns with a failure.
+
+        If selected queue entry is part of a select operation, it is also
+        consumed. If it consumes `caller_sel` but `peer_sel` was already
+        consumed whole select operation would fail and caller would need to try
+        again. This should be a rare case, where the `peer_sel` gets consumed by
+        someone else between the first if check which verifies that it is not
+        consumed and the point we actually try to consume it.
+
         Param:
             entryq = Queue to append the new ChannelQueueEntry
+            caller_sel = SelectState instace of the select call being executed
+            caller_sel_id = id of the select call being executed
 
         Return:
             a valid ChannelQueueEntry or null
 
     ***********************************************************************/
 
-    private ChannelQueueEntry dequeueEntry (ref DList!ChannelQueueEntry entryq) nothrow
+    private ChannelQueueEntry dequeueEntry (ref DList!ChannelQueueEntry entryq,
+                                            SelectState caller_sel = null, int caller_sel_id = 0) nothrow
     {
-        if (!entryq.empty())
+        while (!entryq.empty())
         {
             ChannelQueueEntry qent = entryq.front();
+            auto peer_sel = qent.select_state;
+
+            if (!peer_sel || !peer_sel.isConsumed())
+            {
+                // If we are in a select call, try to consume the caller select
+                // if we can't consume the caller select, no need to continue
+                if (caller_sel && !caller_sel.tryConsume(caller_sel_id))
+                {
+                    return null;
+                }
+
+                // At this point, caller select is consumed.
+                // Try to consume the peer select if it exists
+                // If peer_sel was consumed by someone else, tough luck
+                // In that case, whole select will fail since we consumed the caller_sel
+                if (!peer_sel || peer_sel.tryConsume(qent.sel_id))
+                {
+                    entryq.removeFront();
+                    return qent;
+                }
+                else if (caller_sel)
+                {
+                    // Mark caller_sel failed
+                    caller_sel.id = -1;
+                    caller_sel.success = false;
+                    return null;
+                }
+            }
+
             entryq.removeFront();
-            return qent;
         }
 
         return null;
@@ -2123,6 +2449,180 @@ public:
 
             thread_joinAll();
             assert(reader_sum == writer_sum);
+        }
+    );
+}
+
+@system unittest
+{
+    FiberScheduler scheduler = new FiberScheduler;
+    auto chn1 = new Channel!int();
+    auto chn2 = new Channel!int(1);
+    auto chn3 = new Channel!int();
+
+    scheduler.spawn(
+        () {
+            chn1.write(42);
+            chn1.close();
+            chn3.write(37);
+        }
+    );
+
+    scheduler.spawn(
+        () {
+            chn2.write(44);
+            chn2.close();
+        }
+    );
+
+    scheduler.start(
+        () {
+            bool[3] chn_closed;
+            int[3] read_val;
+            for (int i = 0; i < 5; ++i)
+            {
+                SelectEntry[] read_list;
+                SelectEntry[] write_list;
+
+                if (!chn_closed[0])
+                    read_list ~= SelectEntry(chn1, &read_val[0]);
+                if (!chn_closed[1])
+                    read_list ~= SelectEntry(chn2, &read_val[1]);
+                read_list ~= SelectEntry(chn3, &read_val[2]);
+
+                auto select_return = select(read_list, write_list);
+
+                if (!select_return.success)
+                {
+                    if (!chn_closed[0])  chn_closed[0] = true;
+                    else if (!chn_closed[1])  chn_closed[1] = true;
+                    else chn_closed[2] = true;
+                }
+            }
+            assert(read_val[0] == 42 && read_val[1] == 44 && read_val[2] == 37);
+            assert(chn_closed[0] && chn_closed[1] && !chn_closed[2]);
+        }
+    );
+}
+
+@system unittest
+{
+    FiberScheduler scheduler = new FiberScheduler;
+
+    auto chn1 = new Channel!int(20);
+    auto chn2 = new Channel!int();
+    auto chn3 = new Channel!int(20);
+    auto chn4 = new Channel!int();
+
+    void thread_func (T) (ref T write_chn, ref T read_chn, int _tid)
+    {
+        FiberScheduler scheduler = new FiberScheduler;
+        int read_val, write_val;
+        int prev_read = -1;
+        int n = 10000;
+
+        scheduler.start(
+            () {
+                while(read_val < n || write_val <= n)
+                {
+                    int a;
+                    SelectEntry[] read_list;
+                    SelectEntry[] write_list;
+
+                    if (write_val <= n)
+                        write_list ~= SelectEntry(write_chn, &write_val);
+
+                    if (read_val < n)
+                        read_list ~= SelectEntry(read_chn, &read_val);
+
+                    auto select_return = select(read_list, write_list);
+
+                    if (select_return.success)
+                    {
+                        if (read_list.length > 0 && select_return.id == 0)
+                        {
+                            assert(prev_read + 1 == read_val);
+                            prev_read = read_val;
+                        }
+                        else
+                        {
+                            write_val++;
+                        }
+                    }
+                }
+            }
+        );
+    }
+
+    auto t1 = new InfoThread({
+        thread_func(chn1, chn2, 0);
+    });
+    t1.start();
+
+    auto t2 = new InfoThread({
+        thread_func(chn2, chn3, 1);
+    });
+    t2.start();
+
+    auto t3 = new InfoThread({
+        thread_func(chn3, chn4, 2);
+    });
+    t3.start();
+
+    thread_func(chn4, chn1, 3);
+
+    thread_joinAll();
+}
+
+@system unittest
+{
+    FiberScheduler scheduler = new FiberScheduler;
+    auto chn1 = new Channel!int();
+    auto chn2 = new Channel!int();
+
+    scheduler.spawn(
+        () {
+            FiberScheduler.yield();
+            chn1.close();
+        }
+    );
+
+    scheduler.spawn(
+        () {
+            FiberScheduler.yield();
+            chn2.close();
+        }
+    );
+
+    scheduler.spawn(
+        () {
+            for (int i = 0; i < 2; ++i)
+            {
+                int write_val = 42;
+                SelectEntry[] read_list;
+                SelectEntry[] write_list;
+                write_list ~= SelectEntry(chn1, &write_val);
+                auto select_return = select(read_list, write_list);
+
+                assert(select_return.id == 0);
+                assert(!select_return.success);
+            }
+        }
+    );
+
+    scheduler.start(
+        () {
+            for (int i = 0; i < 2; ++i)
+            {
+                int read_val;
+                SelectEntry[] read_list;
+                SelectEntry[] write_list;
+                read_list ~= SelectEntry(chn2, &read_val);
+                auto select_return = select(read_list, write_list);
+
+                assert(select_return.id == 0);
+                assert(!select_return.success);
+            }
         }
     );
 }
