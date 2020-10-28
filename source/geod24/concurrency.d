@@ -989,13 +989,6 @@ protected:
 
         }
 
-        void wait () nothrow
-        {
-            this.registerToInfoFiber();
-            FiberScheduler.yield();
-            this.notified = false;
-        }
-
         /***********************************************************************
 
             Wait on the semaphore with optional timeout
@@ -1008,14 +1001,14 @@ protected:
         bool wait (Duration period = Duration.init) nothrow
         {
             this.registerToInfoFiber();
-            this.limit = MonoTime.currTime + period;
+            if (period != Duration.init)
+                this.limit = MonoTime.currTime + period;
 
             FiberScheduler.yield();
 
-            bool was_notified = this.notified;
             this.limit = MonoTime.init;
             this.notified = false;
-            return was_notified;
+            return !this.hasTimedOut();
         }
 
         /***********************************************************************
@@ -1026,6 +1019,7 @@ protected:
 
         void notify () nothrow
         {
+            this.stopTimer();
             this.notified = true;
         }
 
@@ -1043,15 +1037,55 @@ protected:
             bool timed_out = (this.limit != MonoTime.init
                                 && MonoTime.currTime >= this.limit);
 
-            return !timed_out && !notified;
+            if (timed_out)
+                cas(&this.timer_state, TimerState.Running, TimerState.TimedOut);
+
+            return atomicLoad(this.timer_state) != TimerState.TimedOut && !this.notified;
+        }
+
+        /***********************************************************************
+
+            Try freezing the internal timer
+
+        ***********************************************************************/
+
+        bool stopTimer () nothrow
+        {
+            return cas(&this.timer_state, TimerState.Running, TimerState.Stopped);
+        }
+
+        /***********************************************************************
+
+            Query if the internal timer has timed out
+
+        ***********************************************************************/
+
+        bool hasTimedOut () nothrow
+        {
+            return atomicLoad(this.timer_state) == TimerState.TimedOut;
+        }
+
+        MonoTime getTimeout () nothrow
+        {
+            return limit;
         }
 
     private:
+        enum TimerState
+        {
+            Running,
+            TimedOut,
+            Stopped
+        }
+
         /// Time limit that will eventually unblock the caller if a timeout is specified
         MonoTime limit = MonoTime.init;
 
         /// State of the semaphore
         bool notified;
+
+        /// State of the internal timer
+        shared(TimerState) timer_state;
     }
 
 private:
@@ -1728,7 +1762,6 @@ final public class Channel (T) : Selectable
 
         Param:
             val = Message to write to `Channel`
-
             duration = Timeout duration
 
         Returns:
@@ -1736,7 +1769,7 @@ final public class Channel (T) : Selectable
 
     ***********************************************************************/
 
-    bool write () (auto ref T val) nothrow
+    bool write () (auto ref T val, Duration duration = Duration.init) nothrow
     {
         this.lock.lock_nothrow();
 
@@ -1746,9 +1779,7 @@ final public class Channel (T) : Selectable
         {
             ChannelQueueEntry q_ent = this.enqueueEntry(this.writeq, &val);
             this.lock.unlock_nothrow();
-
-            q_ent.sem.wait();
-            return q_ent.success;
+            return q_ent.sem.wait(duration) && q_ent.success;
         }
 
         this.lock.unlock_nothrow();
@@ -1861,14 +1892,15 @@ final public class Channel (T) : Selectable
 
         Param:
             output = Reference to output variable
+            duration = Timeout duration
 
         Returns:
             Success/Failure - Fails when channel is closed and there are
-            no existing messages to be read.
+            no existing messages to be read. Fails when timeout is reached.
 
     ***********************************************************************/
 
-    bool read (ref T output) nothrow
+    bool read (ref T output, Duration duration = Duration.init) nothrow
     {
         this.lock.lock_nothrow();
 
@@ -1878,9 +1910,7 @@ final public class Channel (T) : Selectable
         {
             ChannelQueueEntry q_ent = this.enqueueEntry(this.readq, &output);
             this.lock.unlock_nothrow();
-
-            q_ent.sem.wait();
-            return q_ent.success;
+            return q_ent.sem.wait(duration) && q_ent.success;
         }
 
         this.lock.unlock_nothrow();
@@ -2154,7 +2184,7 @@ final public class Channel (T) : Selectable
             ChannelQueueEntry qent = entryq.front();
             auto peer_sel = qent.select_state;
 
-            if (!peer_sel || !peer_sel.isConsumed())
+            if ((!peer_sel || !peer_sel.isConsumed()) && qent.sem.shouldBlock())
             {
                 // If we are in a select call, try to consume the caller select
                 // if we can't consume the caller select, no need to continue
@@ -2167,7 +2197,7 @@ final public class Channel (T) : Selectable
                 // Try to consume the peer select if it exists
                 // If peer_sel was consumed by someone else, tough luck
                 // In that case, whole select will fail since we consumed the caller_sel
-                if (!peer_sel || peer_sel.tryConsume(qent.sel_id))
+                if ((!peer_sel || peer_sel.tryConsume(qent.sel_id)) && qent.sem.stopTimer())
                 {
                     entryq.removeFront();
                     return qent;
@@ -2625,4 +2655,55 @@ public:
             }
         }
     );
+}
+
+@system unittest
+{
+    FiberScheduler scheduler = new FiberScheduler;
+    auto chn1 = new Channel!int();
+
+    immutable auto start = MonoTime.currTime;
+
+    auto t1 = new Thread({
+        FiberScheduler scheduler = new FiberScheduler;
+        scheduler.start(
+            () {
+                Thread.sleep(100.msecs);
+                assert(chn1.write(42));
+            }
+        );
+    });
+    t1.start();
+
+    auto t2 = new Thread({
+        FiberScheduler scheduler = new FiberScheduler;
+        scheduler.start(
+            () {
+                int read_val;
+                Thread.sleep(200.msecs);
+                assert(chn1.read(read_val));
+                assert(read_val == 43);
+            }
+        );
+    });
+    t2.start();
+
+    scheduler.start(
+        () {
+            int read_val;
+
+            assert(!chn1.read(read_val, 10.msecs));
+            assert(MonoTime.currTime - start >= 10.msecs);
+            assert(chn1.read(read_val, 200.msecs));
+            assert(MonoTime.currTime - start >= 100.msecs);
+            assert(read_val == 42);
+
+            assert(!chn1.write(read_val + 1, 10.msecs));
+            assert(MonoTime.currTime - start >= 110.msecs);
+            assert(chn1.write(read_val + 1, 200.msecs));
+            assert(MonoTime.currTime - start >= 200.msecs);
+        }
+    );
+
+    thread_joinAll();
 }
