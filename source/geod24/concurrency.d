@@ -45,6 +45,8 @@ import core.thread;
 import core.time : MonoTime;
 import std.range.primitives;
 import std.traits;
+import std.algorithm;
+import std.container : DList;
 
 ///
 @system unittest
@@ -247,7 +249,6 @@ class TidMissingException : Exception
     ///
     mixin basicExceptionCtors;
 }
-
 
 // Thread ID
 
@@ -815,6 +816,39 @@ public class InfoThread : Thread
 }
 
 
+private FiberScheduler thisSchedulerStorage;
+
+/***************************************************************************
+
+    Get current running FiberScheduler
+
+    Returns:
+        Returns a reference to the current scheduler or null no
+        scheduler is running
+
+    TODO: Support for nested schedulers
+
+***************************************************************************/
+
+public FiberScheduler thisScheduler () nothrow
+{
+    return thisSchedulerStorage;
+}
+
+/***************************************************************************
+
+    Set current running FiberScheduler
+
+    Params:
+        value = Reference to the current FiberScheduler
+
+***************************************************************************/
+
+public void thisScheduler (FiberScheduler value) nothrow
+{
+    thisSchedulerStorage = value;
+}
+
 /**
  * An example Scheduler using Fibers.
  *
@@ -904,7 +938,7 @@ protected:
      * Params:
      *   op = The delegate the fiber should call
      */
-    void create(void delegate() op) nothrow
+    void create (void delegate() op) nothrow
     {
         void wrap()
         {
@@ -928,13 +962,13 @@ protected:
         /// Semaphore reference that this Fiber is blocked on
         FiberBinarySemaphore sem;
 
-        this(void delegate() op, size_t sz = 512 * 1024) nothrow
+        this (void delegate() op, size_t sz = 512 * 1024) nothrow
         {
             super(op, sz);
         }
     }
 
-    protected class FiberBinarySemaphore
+    final public class FiberBinarySemaphore
     {
 
         /***********************************************************************
@@ -946,7 +980,7 @@ protected:
 
         ***********************************************************************/
 
-        private void registerToInfoFiber(InfoFiber info_fiber = cast(InfoFiber) Fiber.getThis()) nothrow
+        private void registerToInfoFiber (InfoFiber info_fiber = cast(InfoFiber) Fiber.getThis()) nothrow
         {
             assert(info_fiber !is null, "This Fiber does not belong to FiberScheduler");
             assert(info_fiber.sem is null, "This Fiber already has a registered FiberBinarySemaphore");
@@ -954,31 +988,44 @@ protected:
 
         }
 
-        void wait() nothrow
+        void wait () nothrow
         {
             this.registerToInfoFiber();
             FiberScheduler.yield();
-            scope (exit) this.notified = false;
+            this.notified = false;
         }
 
-        bool wait(Duration period) nothrow
+        /***********************************************************************
+
+            Wait on the semaphore with optional timeout
+
+            Params:
+                period = Timeout period
+
+        ***********************************************************************/
+
+        bool wait (Duration period = Duration.init) nothrow
         {
             this.registerToInfoFiber();
             this.limit = MonoTime.currTime + period;
+
             FiberScheduler.yield();
 
-            scope (exit)
-            {
-                this.limit = MonoTime.init;
-                this.notified = false;
-            }
-            return this.notified;
+            bool was_notified = this.notified;
+            this.limit = MonoTime.init;
+            this.notified = false;
+            return was_notified;
         }
 
-        void notify() nothrow
+        /***********************************************************************
+
+            Unblock the Fiber waiting on this semaphore
+
+        ***********************************************************************/
+
+        void notify () nothrow
         {
             this.notified = true;
-            FiberScheduler.yield();
         }
 
         /***********************************************************************
@@ -990,10 +1037,10 @@ protected:
 
         ***********************************************************************/
 
-        bool shouldBlock() nothrow
+        bool shouldBlock () nothrow
         {
-            bool timed_out = (limit != MonoTime.init
-                                && MonoTime.currTime >= limit);
+            bool timed_out = (this.limit != MonoTime.init
+                                && MonoTime.currTime >= this.limit);
 
             return !timed_out && !notified;
         }
@@ -1020,6 +1067,9 @@ private:
     void dispatch(size_t pos = 0)
     {
         import std.algorithm.mutation : remove;
+
+        thisScheduler(this);
+        scope (exit) thisScheduler(null);
 
         assert(pos < m_fibers.length);
         while (m_fibers.length > 0)
@@ -1445,4 +1495,634 @@ private:
     auto self = thisTid();
     self.receiveOnly!(bool);
     assert(x[0] == 5);
+}
+
+/***********************************************************************
+
+    A golang style channel implementation with buffered and unbuffered
+    operation modes
+
+    Intended to be used between Fibers
+
+    Param:
+        T = Type of the messages carried accross the `Channel`. Currently
+            all reference and values types are supported.
+
+***********************************************************************/
+
+final public class Channel (T)
+{
+    /***********************************************************************
+
+        Constructs a Channel
+
+        Param:
+            max_size = Maximum amount of T a Channel can buffer
+                       (0 -> Unbuffered operation,
+                        Positive integer -> Buffered operation)
+
+    ***********************************************************************/
+
+    this (ulong max_size = 0) nothrow
+    {
+        this.max_size = max_size;
+        this.lock = new Mutex;
+    }
+
+    /***********************************************************************
+
+        Write a message to the `Channel` with an optional timeout
+
+        Unbuffered mode:
+
+            If a reader is already blocked on the `Channel`, writer copies the
+            message to reader's buffer and wakes up the reader by yielding
+
+            If no reader is ready in the wait queue, writer appends itself
+            to write wait queue and blocks
+
+        Buffered mode:
+
+            If a reader is already blocked on the `Channel`, writer copies the
+            message to reader's buffer and wakes up the reader and returns
+            immediately.
+
+            If the buffer is not full writer puts the message in the `Channel`
+            buffer and returns immediately
+
+            If buffer is full writer appends itself to write wait queue and blocks
+
+        If `Channel` is closed, it returns immediately with a failure,
+        regardless of the operation mode
+
+        Param:
+            val = Message to write to `Channel`
+
+            duration = Timeout duration
+
+        Returns:
+            Success/Failure - Fails when `Channel` is closed or timeout is reached.
+
+    ***********************************************************************/
+
+    bool write () (auto ref T val) nothrow
+    {
+        this.lock.lock_nothrow();
+
+        bool success = tryWrite(val);
+
+        if (!success && !this.closed)
+        {
+            ChannelQueueEntry q_ent = this.enqueueEntry(this.writeq, &val);
+            this.lock.unlock_nothrow();
+
+            q_ent.sem.wait();
+            return q_ent.success;
+        }
+
+        this.lock.unlock_nothrow();
+        return success;
+    }
+
+    /***********************************************************************
+
+        Try to write a message to `Channel` without blocking
+
+        tryWrite writes a message if it is possible to do so without blocking.
+
+        Param:
+            val = Message to write to `Channel`
+
+        Returns:
+            Success/Failure
+
+    ***********************************************************************/
+
+    private bool tryWrite () (auto ref T val) nothrow
+    {
+        if (this.closed)
+        {
+            return false;
+        }
+
+        if (ChannelQueueEntry readq_ent = this.dequeueEntry(this.readq))
+        {
+            *readq_ent.pVal = val;
+            readq_ent.sem.notify();
+            return true;
+        }
+
+        if (this.max_size > 0 // this.max_size > 0 = buffered
+                    && this.buffer.length < this.max_size)
+        {
+            this.buffer ~= val;
+            return true;
+        }
+
+        return false;
+    }
+
+    /***********************************************************************
+
+        Read a message from the Channel with an optional timeout
+
+        Unbuffered mode:
+
+            If a writer is already blocked on the Channel, reader copies the
+            value to `output` and wakes up the writer by yielding
+
+            If no writer is ready in the wait queue, reader appends itself
+            to read wait queue and blocks
+
+            If channel is closed, it returns immediatly with a failure
+
+        Buffered mode:
+
+            If there are existing messages in the buffer, reader pops one off
+            the buffer and returns immediatly with success, regardless of the
+            Channel being closed or not
+
+            If there are no messages in the buffer it behaves exactly like the
+            unbuffered operation
+
+        Param:
+            output = Reference to output variable
+
+        Returns:
+            Success/Failure - Fails when channel is closed and there are
+            no existing messages to be read.
+
+    ***********************************************************************/
+
+    bool read (ref T output) nothrow
+    {
+        this.lock.lock_nothrow();
+
+        bool success = tryRead(output);
+
+        if (!success && !this.closed)
+        {
+            ChannelQueueEntry q_ent = this.enqueueEntry(this.readq, &output);
+            this.lock.unlock_nothrow();
+
+            q_ent.sem.wait();
+            return q_ent.success;
+        }
+
+        this.lock.unlock_nothrow();
+        return success;
+    }
+
+    /***********************************************************************
+
+        Try to read a message from Channel without blocking
+
+        tryRead reads a message if it is possible to do so without blocking.
+
+        Param:
+            output = Field to write the message to
+
+        Returns:
+            Success/Failure
+
+    ***********************************************************************/
+
+    private bool tryRead (ref T output) nothrow
+    {
+        ChannelQueueEntry write_ent = this.dequeueEntry(this.writeq);
+
+        if (this.buffer.length > 0)
+        {
+            output = this.buffer[0];
+            this.buffer = this.buffer.remove(0);
+
+            if (write_ent)
+            {
+                this.buffer ~= *write_ent.pVal;
+            }
+        }
+        else if (write_ent)
+        {
+            output = *write_ent.pVal;
+        }
+        else
+        {
+            return false;
+        }
+
+        if (write_ent)
+            write_ent.sem.notify();
+        return true;
+    }
+
+    /***********************************************************************
+
+        Close the channel
+
+        Closes the channel by marking it closed and flushing all the wait
+        queues
+
+    ***********************************************************************/
+
+    void close () nothrow
+    {
+        this.lock.lock_nothrow();
+        if (!this.closed)
+        {
+            this.closed = true;
+
+            // Wake blocked Fibers up, report the failure
+            foreach (ref entry; this.readq)
+            {
+                entry.terminate();
+            }
+            foreach (ref entry; this.writeq)
+            {
+                entry.terminate();
+            }
+
+            this.readq.clear();
+            this.writeq.clear();
+        }
+        this.lock.unlock_nothrow();
+    }
+
+    /***********************************************************************
+
+        Return the length of the internal buffer
+
+    ***********************************************************************/
+
+    size_t length () nothrow
+    {
+        this.lock.lock_nothrow();
+        scope (exit) this.lock.unlock_nothrow();
+        return this.buffer.length;
+    }
+
+    /***********************************************************************
+
+        Return the closed status of the `Channel`
+
+    ***********************************************************************/
+
+    bool isClosed () nothrow
+    {
+        this.lock.lock_nothrow();
+        scope (exit) this.lock.unlock_nothrow();
+        return this.closed;
+    }
+
+    /***********************************************************************
+
+        An aggrate of neccessary information to block a Fiber and record
+        their request
+
+    ***********************************************************************/
+
+    private class ChannelQueueEntry
+    {
+        /// Semaphore blocking the `Fiber`
+        FiberScheduler.FiberBinarySemaphore sem;
+
+        /// Pointer to the variable that we will read to/from
+        T* pVal;
+
+        /// Result of the blocking read/write call
+        bool success = true;
+
+        this (T* pVal) nothrow
+        {
+            this.pVal = pVal;
+            this.sem = thisScheduler().new FiberBinarySemaphore();
+        }
+
+        /***********************************************************************
+
+            Terminate a `ChannelQueueEntry` by waking up the blocked Fiber
+            and reporting the failure
+
+            This is called on all the `ChannelQueueEntry` instances still in
+            the wait queues when Channel is closed
+
+        ***********************************************************************/
+
+        void terminate () nothrow
+        {
+            this.success = false;
+            this.sem.notify();
+        }
+    }
+
+    /***********************************************************************
+
+        Create and enqueue a `ChannelQueueEntry` to the given entryq
+
+        Param:
+            entryq = Queue to append the new ChannelQueueEntry
+            pVal =  Pointer to the message buffer
+
+        Return:
+            newly created ChannelQueueEntry
+
+    ***********************************************************************/
+
+    private ChannelQueueEntry enqueueEntry (ref DList!ChannelQueueEntry entryq, T* pVal) nothrow
+    {
+        assert(pVal !is null);
+
+        ChannelQueueEntry q_ent = new ChannelQueueEntry(pVal);
+        entryq.insert(q_ent);
+
+        return q_ent;
+    }
+
+    /***********************************************************************
+
+        Dequeue a `ChannelQueueEntry` from the given `entryq`
+
+        Param:
+            entryq = Queue to append the new ChannelQueueEntry
+
+        Return:
+            a valid ChannelQueueEntry or null
+
+    ***********************************************************************/
+
+    private ChannelQueueEntry dequeueEntry (ref DList!ChannelQueueEntry entryq) nothrow
+    {
+        if (!entryq.empty())
+        {
+            ChannelQueueEntry qent = entryq.front();
+            entryq.removeFront();
+            return qent;
+        }
+
+        return null;
+    }
+
+private:
+    /// Internal data storage
+    T[] buffer;
+
+    /// Closed flag
+    bool closed;
+
+    /// Per channel lock
+    Mutex lock;
+
+    /// List of fibers blocked on read()
+    DList!ChannelQueueEntry readq;
+
+    /// List of fibers blocked on write()
+    DList!ChannelQueueEntry writeq;
+
+public:
+    /// Maximum amount of T a Channel can buffer
+    immutable ulong max_size;
+}
+
+// Test non blocking operation
+@system unittest
+{
+    string str = "DEADBEEF";
+    string rcv_str;
+    FiberScheduler scheduler = new FiberScheduler;
+    auto chn = new Channel!string(2);
+
+    chn.write(str ~ " 1");
+    assert(chn.length() == 1);
+    chn.write(str ~ " 2");
+    assert(chn.length() == 2);
+
+    assert(chn.read(rcv_str));
+    assert(rcv_str == str ~ " 1");
+    assert(chn.length() == 1);
+
+    chn.write(str ~ " 3");
+    assert(chn.length() == 2);
+
+    assert(chn.read(rcv_str));
+    assert(rcv_str == str ~ " 2");
+    assert(chn.length() == 1);
+
+    assert(chn.read(rcv_str));
+    assert(rcv_str == str ~ " 3");
+    assert(chn.length() == 0);
+}
+
+// Test unbuffered blocking operation with multiple receivers
+// Receiver should read every message in the order they were sent
+@system unittest
+{
+    FiberScheduler scheduler = new FiberScheduler;
+    auto chn = new Channel!int();
+    int n = 1000;
+    long sum;
+
+    scheduler.spawn(
+        () {
+            int val, prev;
+            bool ret = chn.read(prev);
+            sum += prev;
+            assert(ret);
+
+            while (chn.read(val))
+            {
+                sum += val;
+                assert(ret);
+                assert(prev < val);
+                prev = val;
+            }
+        }
+    );
+
+    scheduler.spawn(
+        () {
+            int val, prev;
+            bool ret = chn.read(prev);
+            sum += prev;
+            assert(ret);
+
+            while (chn.read(val))
+            {
+                sum += val;
+                assert(ret);
+                assert(prev < val);
+                prev = val;
+            }
+        }
+    );
+
+    scheduler.start(
+        () {
+            for (int i = 0; i <= n; i++)
+            {
+                assert(chn.write(i));
+            }
+            chn.close();
+
+            assert(!chn.write(0));
+        }
+    );
+
+    // Sum of [0..1000]
+    assert(sum == n*(n+1)/2);
+}
+
+// Test that writer is not blocked until buffer is full and a read unblocks the writer
+// Reader should be able to read remaining messages after chn is closed
+@system unittest
+{
+    FiberScheduler scheduler = new FiberScheduler;
+    auto chn = new Channel!int(5);
+
+    scheduler.spawn(
+        () {
+            int val;
+            assert(chn.max_size == chn.length);
+            assert(chn.read(val));
+            chn.close();
+            // Read remaining messages after channel is closed
+            for (int i = 0; i < chn.max_size; i++)
+            {
+                assert(chn.read(val));
+            }
+            // No more messages to read on closed chn
+            assert(!chn.read(val));
+        }
+    );
+
+    scheduler.start(
+        () {
+            for (int i = 0; i < chn.max_size; i++)
+            {
+                assert(chn.write(i));
+            }
+            assert(chn.max_size == chn.length);
+            // Wait for read.
+            assert(chn.write(42));
+            // Reader already closed the channel
+            assert(!chn.write(0));
+        }
+    );
+}
+
+@system unittest
+{
+    struct HyperLoopMessage
+    {
+        int id;
+        MonoTime time;
+    }
+
+    FiberScheduler scheduler = new FiberScheduler;
+    auto chn1 = new Channel!HyperLoopMessage();
+    auto chn2 = new Channel!HyperLoopMessage();
+    auto chn3 = new Channel!HyperLoopMessage();
+
+    scheduler.spawn(
+        () {
+            HyperLoopMessage msg;
+
+            for (int i = 0; i < 1000; ++i)
+            {
+                assert(chn2.read(msg));
+                assert(msg.id % 3 == 1);
+                msg.id++;
+                msg.time = MonoTime.currTime;
+                assert(chn3.write(msg));
+            }
+        }
+    );
+
+    scheduler.spawn(
+        () {
+            HyperLoopMessage msg;
+
+            for (int i = 0; i < 1000; ++i)
+            {
+                assert(chn1.read(msg));
+                assert(msg.id % 3 == 0);
+                msg.id++;
+                msg.time = MonoTime.currTime;
+                assert(chn2.write(msg));
+            }
+        }
+    );
+
+    scheduler.start(
+        () {
+            HyperLoopMessage msg = {
+                id : 0,
+                time : MonoTime.currTime
+            };
+
+            for (int i = 0; i < 1000; ++i)
+            {
+                assert(chn1.write(msg));
+                assert(chn3.read(msg));
+                assert(msg.id % 3 == 2);
+                msg.id++;
+                msg.time = MonoTime.currTime;
+            }
+        }
+    );
+}
+
+// Multiple writer threads writing to a buffered channel
+// Reader should receive all messages
+@system unittest
+{
+    FiberScheduler scheduler = new FiberScheduler;
+    immutable int n = 5000;
+    auto chn1 = new Channel!int(n/10);
+
+    shared int sharedVal = 0;
+    shared int writer_sum = 0;
+
+    auto t1 = new InfoThread({
+        FiberScheduler scheduler = new FiberScheduler();
+        scheduler.start(
+            () {
+                int val = atomicOp!"+="(sharedVal, 1);
+                while (chn1.write(val))
+                {
+                    atomicOp!"+="(writer_sum, val);
+                    val = atomicOp!"+="(sharedVal, 1);
+                }
+            }
+        );
+    });
+    t1.start();
+
+    auto t2 = new InfoThread({
+        FiberScheduler scheduler = new FiberScheduler();
+        scheduler.start(
+            () {
+                int val = atomicOp!"+="(sharedVal, 1);
+                while (chn1.write(val))
+                {
+                    atomicOp!"+="(writer_sum, val);
+                    val = atomicOp!"+="(sharedVal, 1);
+                }
+            }
+        );
+    });
+    t2.start();
+
+    scheduler.start(
+        () {
+            int reader_sum, readVal, count;
+
+            while(chn1.read(readVal))
+            {
+                reader_sum += readVal;
+                if (count++ == n) chn1.close();
+            }
+
+            thread_joinAll();
+            assert(reader_sum == writer_sum);
+        }
+    );
 }
