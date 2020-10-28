@@ -41,6 +41,7 @@ public import std.variant;
 import core.atomic;
 import core.sync.condition;
 import core.sync.mutex;
+import core.sync.semaphore;
 import core.thread;
 import core.time : MonoTime;
 import std.range.primitives;
@@ -48,6 +49,7 @@ import std.traits;
 import std.algorithm;
 import std.typecons;
 import std.container : DList;
+import std.exception : assumeWontThrow;
 
 import geod24.RingBuffer;
 
@@ -251,6 +253,14 @@ class TidMissingException : Exception
     import std.exception : basicExceptionCtors;
     ///
     mixin basicExceptionCtors;
+}
+
+class FiberBlockedException : Exception
+{
+    this(string msg = "Fiber is blocked") @safe pure nothrow @nogc
+    {
+        super(msg);
+    }
 }
 
 // Thread ID
@@ -860,15 +870,22 @@ public void thisScheduler (FiberScheduler value) nothrow
  */
 class FiberScheduler
 {
+    /// Default ctor
+    this () nothrow
+    {
+        this.sem = assumeWontThrow(new Semaphore());
+        this.blocked_ex = new FiberBlockedException();
+    }
+
     /**
      * This creates a new Fiber for the supplied op and then starts the
      * dispatcher.
      */
     void start(void delegate() op)
     {
-        create(op);
+        create(op, true);
         // Make sure the just-created fiber is run first
-        dispatch(this.m_fibers.length - 1);
+        dispatch();
     }
 
     /**
@@ -913,6 +930,19 @@ class FiberScheduler
     }
 
     /**
+     * If the caller is a scheduled Fiber, this yields execution to another
+     * scheduled Fiber.
+     */
+    static void yieldAndThrow(Throwable t) nothrow
+    {
+        // NOTE: It's possible that we should test whether the calling Fiber
+        //       is an InfoFiber before yielding, but I think it's reasonable
+        //       that any fiber should yield here.
+        if (Fiber.getThis())
+            Fiber.yieldAndThrow(t);
+    }
+
+    /**
      * Returns an appropriate ThreadInfo instance.
      *
      * Returns a ThreadInfo instance specific to the calling Fiber if the
@@ -940,8 +970,10 @@ protected:
      *
      * Params:
      *   op = The delegate the fiber should call
+     *   insert_front = Fiber will be added to the front
+     *                  of the ready queue to be run first
      */
-    void create (void delegate() op) nothrow
+    void create (void delegate() op, bool insert_front = false) nothrow
     {
         void wrap()
         {
@@ -952,7 +984,10 @@ protected:
             op();
         }
 
-        m_fibers ~= new InfoFiber(&wrap);
+        if (insert_front)
+            this.readyq.insertFront(new InfoFiber(&wrap));
+        else
+            this.readyq.insertBack(new InfoFiber(&wrap));
     }
 
     /**
@@ -1002,11 +1037,14 @@ protected:
 
         bool wait (Duration period = Duration.init) nothrow
         {
-            this.registerToInfoFiber();
             if (period != Duration.init)
                 this.limit = MonoTime.currTime + period;
 
-            FiberScheduler.yield();
+            if (this.shouldBlock())
+            {
+                this.registerToInfoFiber();
+                FiberScheduler.yieldAndThrow(this.outer.blocked_ex);
+            }
 
             this.limit = MonoTime.init;
             this.notified = false;
@@ -1023,6 +1061,7 @@ protected:
         {
             this.stopTimer();
             this.notified = true;
+            assumeWontThrow(this.outer.sem.notify());
         }
 
         /***********************************************************************
@@ -1096,59 +1135,127 @@ private:
 
         Start the scheduling loop
 
-        Param:
-            pos = m_fibers index of the Fiber to execute first
-
     ***********************************************************************/
 
-    void dispatch(size_t pos = 0)
+    void dispatch ()
     {
-        import std.algorithm.mutation : remove;
-
         thisScheduler(this);
         scope (exit) thisScheduler(null);
 
-        assert(pos < m_fibers.length);
-        while (m_fibers.length > 0)
+        MonoTime earliest_timeout;
+
+        while (!this.readyq.empty() || !this.wait_list.empty())
         {
-            // Is Fiber waiting on a FiberBinarySemaphore?
-            if (auto sem = m_fibers[pos].sem)
+            while (!readyq.empty())
             {
-                // Is condition met?
-                // TRUE: Clear the sem and schedule the fiber
-                // FALSE: Skip it
-                if (sem.shouldBlock())
+                InfoFiber cur_fiber = this.readyq.front();
+                this.readyq.removeFront();
+
+                assert(cur_fiber.state != Fiber.State.TERM);
+
+                auto t = cur_fiber.call(Fiber.Rethrow.no);
+
+                // Fibers that block on a FiberBinarySemaphore throw an
+                // exception for scheduler to catch
+                if (t is this.blocked_ex)
                 {
-                    if (pos++ >= m_fibers.length - 1)
-                        pos = 0;
+                    auto cur_timeout = cur_fiber.sem.getTimeout();
+
+                    // Keep track of the earliest timeout in the system
+                    if (cur_timeout != MonoTime.init
+                            && (earliest_timeout == MonoTime.init || cur_timeout < earliest_timeout))
+                    {
+                        earliest_timeout = cur_timeout;
+                    }
+
+                    this.wait_list.insert(cur_fiber);
                     continue;
                 }
-                else
+                else if (t)
+                    throw t;
+
+                if (cur_fiber.state != Fiber.State.TERM)
                 {
-                    m_fibers[pos].sem = null;
+                    this.readyq.insert(cur_fiber);
                 }
+
+                // See if there are Fibers to be woken up if we reach a timeout
+                // or the scheduler semaphore was notified
+                if (MonoTime.currTime >= earliest_timeout || this.sem.tryWait())
+                    earliest_timeout = wakeFibers();
             }
 
-            auto t = m_fibers[pos].call(Fiber.Rethrow.no);
-            if (t !is null)
+            if (!this.wait_list.empty())
             {
-                throw t;
+                Duration time_to_timeout = earliest_timeout - MonoTime.currTime;
+
+                // Sleep until a timeout or an event
+                if (earliest_timeout == MonoTime.init)
+                    this.sem.wait();
+                else if (time_to_timeout > 0.seconds)
+                    this.sem.wait(time_to_timeout);
             }
-            if (m_fibers[pos].state == Fiber.State.TERM)
-            {
-                if (pos >= (m_fibers = remove(m_fibers, pos)).length)
-                    pos = 0;
-            }
-            else if (pos++ >= m_fibers.length - 1)
-            {
-                pos = 0;
-            }
+
+            // OS Thread woke up populate ready queue
+            earliest_timeout = wakeFibers();
         }
     }
 
+    /***********************************************************************
+
+        Move unblocked Fibers to ready queue
+
+        Return:
+            Returns the earliest timeout left in the waiting list
+
+    ***********************************************************************/
+
+    MonoTime wakeFibers()
+    {
+        import std.range;
+        MonoTime earliest_timeout;
+
+        auto wait_range = this.wait_list[];
+        while (!wait_range.empty)
+        {
+            auto fiber = wait_range.front;
+
+            // Remove the unblocked Fiber from wait list and
+            // append it to the end ofready queue
+            if (!fiber.sem.shouldBlock())
+            {
+                this.wait_list.popFirstOf(wait_range);
+                fiber.sem = null;
+                this.readyq.insert(fiber);
+            }
+            else
+            {
+                auto timeout = fiber.sem.getTimeout();
+                if (timeout != MonoTime.init
+                        && (earliest_timeout == MonoTime.init || timeout < earliest_timeout))
+                {
+                    earliest_timeout = timeout;
+                }
+                wait_range.popFront();
+            }
+        }
+
+        return earliest_timeout;
+    }
+
 private:
-    /// List of `InfoFiber`s currently in the system
-    InfoFiber[] m_fibers;
+
+    /// OS semaphore for scheduler to sleep on
+    Semaphore sem;
+
+    /// A FIFO Queue of Fibers ready to run
+    DList!InfoFiber readyq;
+
+    /// List of Fibers waiting for an event
+    DList!InfoFiber wait_list;
+
+    /// Cached instance of FiberBlockedException
+    FiberBlockedException blocked_ex;
 }
 
 /// Ensure argument to `start` is run first
