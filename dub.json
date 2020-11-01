@@ -6,6 +6,6 @@
     "authors": [ "Mathias 'Geod24' Lang" ],
 
     "dependencies": {
-        "vibe-d:data": "~>0.8.4"
+        "vibe-d:data": "~>0.8"
     }
 }
