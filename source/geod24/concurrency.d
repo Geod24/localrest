@@ -874,6 +874,7 @@ class FiberScheduler
     this () nothrow
     {
         this.sem = assumeWontThrow(new Semaphore());
+        this.blocked_ex = new FiberBlockedException();
     }
 
     /**
@@ -1042,7 +1043,7 @@ protected:
             if (this.shouldBlock())
             {
                 this.registerToInfoFiber();
-                FiberScheduler.yieldAndThrow(new FiberBlockedException());
+                FiberScheduler.yieldAndThrow(this.outer.blocked_ex);
             }
 
             this.limit = MonoTime.init;
@@ -1156,7 +1157,7 @@ private:
 
                 // Fibers that block on a FiberBinarySemaphore throw an
                 // exception for scheduler to catch
-                if (auto block_ex = cast(FiberBlockedException) t)
+                if (t is this.blocked_ex)
                 {
                     auto cur_timeout = cur_fiber.sem.getTimeout();
 
@@ -1252,6 +1253,9 @@ private:
 
     /// List of Fibers waiting for an event
     DList!InfoFiber wait_list;
+
+    /// Cached instance of FiberBlockedException
+    FiberBlockedException blocked_ex;
 }
 
 /// Ensure argument to `start` is run first
