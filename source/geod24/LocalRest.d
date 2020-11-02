@@ -366,8 +366,8 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         this (Command msg) { this.cmd = msg; this.tag = Variant.Type.command; }
         this (Response msg) { this.res = msg; this.tag = Variant.Type.response; }
         this (FilterAPI msg) { this.filter = msg; this.tag = Variant.Type.filter; }
-        this (TimeCommand msg) { this.time = msg; this.tag = Variant.Type.time_command; }
-        this (ShutdownCommand!API msg) { this.shutdown = msg; this.tag = Variant.Type.shutdown_command; }
+        this (TimeCommand msg) { this.time = msg; this.tag = Variant.Type.timeCommand; }
+        this (ShutdownCommand!API msg) { this.shutdown = msg; this.tag = Variant.Type.shutdownCommand; }
 
         union
         {
@@ -378,16 +378,16 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
             ShutdownCommand!API shutdown;
         }
 
-        ubyte tag;
+        Type tag;
 
         /// Type of a request
-        enum Type
+        enum Type : ubyte
         {
             command,
             response,
             filter,
-            time_command,
-            shutdown_command
+            timeCommand,
+            shutdownCommand,
         }
     }
 
@@ -580,13 +580,13 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                                 else if (!control.drop)
                                     await_msgs ~= msg;
                                 break;
-                            case Variant.Type.shutdown_command:
+                            case Variant.Type.shutdownCommand:
                                 ShutdownCommand!API e = msg.shutdown;
                                 if (e.callback !is null)
                                     e.callback(node);
                                 exc.restart = e.restart;
                                 throw exc;
-                            case Variant.Type.time_command:
+                            case Variant.Type.timeCommand:
                                 TimeCommand s = msg.time;
                                 control.sleep_until = Clock.currTime + s.dur;
                                 control.drop = s.drop;
