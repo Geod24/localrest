@@ -1930,7 +1930,7 @@ final public class Channel (T) : Selectable
     this (ulong max_size = 0) nothrow
     {
         this.max_size = max_size;
-        this.lock = new Mutex;
+        this.lock = new FiberMutex;
         if (max_size)
             this.buffer = new RingBuffer!T(max_size);
     }
@@ -2445,7 +2445,7 @@ private:
     bool closed;
 
     /// Per channel lock
-    Mutex lock;
+    FiberMutex lock;
 
     /// List of fibers blocked on read()
     DList!ChannelQueueEntry readq;
@@ -2466,25 +2466,27 @@ public:
     FiberScheduler scheduler = new FiberScheduler;
     auto chn = new Channel!string(2);
 
-    chn.write(str ~ " 1");
-    assert(chn.length() == 1);
-    chn.write(str ~ " 2");
-    assert(chn.length() == 2);
+    scheduler.start({
+        chn.write(str ~ " 1");
+        assert(chn.length() == 1);
+        chn.write(str ~ " 2");
+        assert(chn.length() == 2);
 
-    assert(chn.read(rcv_str));
-    assert(rcv_str == str ~ " 1");
-    assert(chn.length() == 1);
+        assert(chn.read(rcv_str));
+        assert(rcv_str == str ~ " 1");
+        assert(chn.length() == 1);
 
-    chn.write(str ~ " 3");
-    assert(chn.length() == 2);
+        chn.write(str ~ " 3");
+        assert(chn.length() == 2);
 
-    assert(chn.read(rcv_str));
-    assert(rcv_str == str ~ " 2");
-    assert(chn.length() == 1);
+        assert(chn.read(rcv_str));
+        assert(rcv_str == str ~ " 2");
+        assert(chn.length() == 1);
 
-    assert(chn.read(rcv_str));
-    assert(rcv_str == str ~ " 3");
-    assert(chn.length() == 0);
+        assert(chn.read(rcv_str));
+        assert(rcv_str == str ~ " 3");
+        assert(chn.length() == 0);
+    });
 }
 
 // Test unbuffered blocking operation with multiple receivers
@@ -2924,6 +2926,225 @@ public:
             assert(MonoTime.currTime - start >= 200.msecs);
         }
     );
+
+    thread_joinAll();
+}
+
+/// A simple spinlock
+struct SpinLock
+{
+    /// Spin until lock is free
+    void lock() nothrow
+    {
+        while (!cas(&locked, false, true)) { }
+    }
+
+    /// Atomically unlock
+    void unlock() nothrow
+    {
+        atomicStore!(MemoryOrder.rel)(locked, false);
+    }
+
+    /// Lock state
+    private shared(bool) locked;
+}
+
+/// A Fiber level Semaphore
+class FiberSemaphore
+{
+
+    /***********************************************************************
+
+        Ctor
+
+        Param:
+            count = Initial count of FiberSemaphore
+
+    ************************************************************************/
+
+    this (size_t count = 0) nothrow
+    {
+        this.count = count;
+    }
+
+    /***********************************************************************
+
+        Wait for FiberSemaphore count to be greater than 0
+
+    ************************************************************************/
+
+    void wait () nothrow
+    {
+        this.slock.lock();
+
+        if (this.count > 0)
+        {
+            this.count--;
+            this.slock.unlock();
+            return;
+        }
+        auto entry = new SemaphoreQueueEntry();
+        thisScheduler().addResource(entry);
+        scope (exit) thisScheduler().removeResource(entry);
+        this.queue.insert(entry);
+
+        this.slock.unlock();
+        entry.blocker.wait();
+    }
+
+    /***********************************************************************
+
+        Increment the FiberSemaphore count
+
+    ************************************************************************/
+
+    void notify () nothrow
+    {
+        this.slock.lock();
+        if (auto entry = this.dequeueEntry())
+            entry.blocker.notify();
+        else
+            this.count++;
+        this.slock.unlock();
+    }
+
+    ///
+    private class SemaphoreQueueEntry : FiberScheduler.Resource
+    {
+
+        ///
+        this () nothrow
+        {
+            assert(thisScheduler(), "Can not block with no FiberScheduler running!");
+            this.blocker = thisScheduler(). new FiberBlocker();
+        }
+
+        /***********************************************************************
+
+            Terminate SemaphoreQueueEntry so that it is neutralized
+
+        ************************************************************************/
+
+        void release () nothrow
+        {
+            if (!blocker.stopTimer())
+                this.outer.notify();
+        }
+
+        /// FiberBlocker blocking the `Fiber`
+        FiberScheduler.FiberBlocker blocker;
+    }
+
+    /***********************************************************************
+
+        Dequeue a `SemaphoreQueueEntry` from the waiting queue
+
+        Return:
+            a valid SemaphoreQueueEntry or null
+
+    ***********************************************************************/
+
+    private SemaphoreQueueEntry dequeueEntry () nothrow
+    {
+        while (!this.queue.empty())
+        {
+            auto entry = this.queue.front();
+            this.queue.removeFront();
+            if (entry.blocker.shouldBlock() && entry.blocker.stopTimer())
+            {
+                return entry;
+            }
+        }
+        return null;
+    }
+
+    ///
+    private SpinLock slock;
+
+    /// Waiting queue for Fibers
+    private DList!SemaphoreQueueEntry queue;
+
+    /// Current semaphore count
+    private size_t count;
+}
+
+/// A Fiber level Mutex, essentially a binary FiberSemaphore
+class FiberMutex : FiberSemaphore
+{
+    this () nothrow
+    {
+        super(1);
+    }
+
+    ///
+    alias lock = wait;
+
+    ///
+    alias unlock = notify;
+
+    ///
+    alias lock_nothrow = lock;
+
+    ///
+    alias unlock_nothrow = unlock;
+}
+
+// Test releasing a queue entry
+@system unittest
+{
+    FiberMutex mtx = new FiberMutex();
+    int sharedVal;
+
+    auto t1 = new Thread({
+        FiberScheduler scheduler = new FiberScheduler;
+        scheduler.start(
+            () {
+                mtx.lock();
+                Thread.sleep(400.msecs);
+                sharedVal += 1;
+                mtx.unlock();
+            }
+        );
+    });
+    t1.start();
+
+    auto t2 = new Thread({
+        FiberScheduler scheduler = new FiberScheduler;
+        Thread.sleep(100.msecs);
+
+        scheduler.spawn(
+            () {
+                Thread.sleep(200.msecs);
+                throw new Exception("");
+            }
+        );
+
+        try
+        {
+            scheduler.start(
+                () {
+                    mtx.lock();
+                    sharedVal += 1;
+                    mtx.unlock();
+                }
+            );
+        } catch (Exception e) { }
+    });
+    t2.start();
+
+    auto t3 = new Thread({
+        FiberScheduler scheduler = new FiberScheduler;
+        scheduler.start(
+            () {
+                Thread.sleep(200.msecs);
+                mtx.lock();
+                assert(sharedVal == 1);
+                sharedVal += 1;
+                mtx.unlock();
+            }
+        );
+    });
+    t3.start();
 
     thread_joinAll();
 }
