@@ -231,6 +231,11 @@ public void runTask (void delegate() dg) nothrow
 public void sleep (Duration timeout) nothrow
 {
     assert(!isMainThread(), "Cannot call this function from the main thread");
+
+    // Duration.init (0.seconds) is infinite timeout, ignore
+    if (timeout == Duration.init)
+        return;
+
     scope sem = scheduler.new FiberBinarySemaphore();
     sem.wait(timeout);
 }
