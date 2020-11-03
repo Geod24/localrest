@@ -805,7 +805,6 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                                 }
                                 outgoing_conns.each!((conn) => conn.close());
                                 outgoing_conns.clear();
-
                                 if (e.callback !is null)
                                     e.callback(node);
                                 exc.restart = e.restart;
