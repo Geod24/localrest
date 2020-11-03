@@ -2823,3 +2823,22 @@ public:
 
     thread_joinAll();
 }
+
+/// A simple spinlock
+struct SpinLock
+{
+    /// Spin until lock is free
+    void lock() nothrow
+    {
+        while (!cas(&locked, false, true)) { }
+    }
+
+    /// Atomically unlock
+    void unlock() nothrow
+    {
+        atomicStore!(MemoryOrder.rel)(locked, false);
+    }
+
+    /// Lock state
+    private shared(bool) locked;
+}
