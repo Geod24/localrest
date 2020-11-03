@@ -317,7 +317,7 @@ private class Connection
                 return existing_res.res;
 
             // Block while waiting the Response
-            auto blocker = C.thisScheduler().new FiberBinarySemaphore();
+            auto blocker = C.thisScheduler().new FiberBlocker();
             this.waiting_list[resp_id] = Waiting(blocker);
             if (blocker.wait(timeout))
                 return this.waiting_list[resp_id].res;
@@ -341,7 +341,7 @@ private class Connection
         if (auto waiter = (res.id in this.waiting_list))
         {
             waiter.res = res;
-            waiter.sem.notify();
+            waiter.blocker.notify();
         }
         else // Fiber is not yet blocked, create an entry for the related Fiber to use
             this.waiting_list[res.id] = Waiting(null, res);
@@ -363,7 +363,7 @@ private class Connection
     ///
     private struct Waiting
     {
-        C.FiberScheduler.FiberBinarySemaphore sem;
+        C.FiberScheduler.FiberBlocker blocker;
         Response res;
     }
 
@@ -443,8 +443,8 @@ public void sleep (Duration timeout) nothrow
     if (timeout == Duration.init)
         return;
 
-    scope sem = scheduler.new FiberBinarySemaphore();
-    sem.wait(timeout);
+    scope blocker = scheduler.new FiberBlocker();
+    blocker.wait(timeout);
 }
 
 /*******************************************************************************
