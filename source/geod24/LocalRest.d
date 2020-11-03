@@ -236,8 +236,8 @@ public void sleep (Duration timeout) nothrow
     if (timeout == Duration.init)
         return;
 
-    scope sem = scheduler.new FiberBinarySemaphore();
-    sem.wait(timeout);
+    scope blocker = scheduler.new FiberBlocker();
+    blocker.wait(timeout);
 }
 
 /*******************************************************************************
