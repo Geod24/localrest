@@ -179,9 +179,6 @@ private struct ArgWrapper (T...)
 /// We need a scheduler to simulate an event loop and to be re-entrant
 private C.FiberScheduler scheduler;
 
-/// Whether this is the main thread
-private bool is_main_thread;
-
 /***********************************************************************
 
     Check if the current context is running inside the main thread and
@@ -196,11 +193,8 @@ private bool isMainThread() nothrow
 {
     // we are in the main thread
     if (scheduler is null)
-    {
         scheduler = new C.FiberScheduler;
-        is_main_thread = true;
-    }
-    return is_main_thread;
+    return C.thisScheduler() is null;
 }
 
 /*******************************************************************************
