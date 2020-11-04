@@ -590,7 +590,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                                 control.filter = filter_api;
                                 break;
                             default:
-                                assert(0);
+                                assert(0, "Got invalid Variant.Type: " ~ msg.tag);
                         }
                     }
 
