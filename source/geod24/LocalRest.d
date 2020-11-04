@@ -698,6 +698,23 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
         /***********************************************************************
 
+            Send `Variant` to peer in a Fiber
+
+            Param:
+                var = `Variant` to send
+
+        ***********************************************************************/
+
+        private void sendToPeer (Variant var)
+        {
+            if (isMainThread())
+                scheduler.start({ this.listen_chn.write(var); });
+            else
+                this.listen_chn.write(var);
+        }
+
+        /***********************************************************************
+
             Send an async message to the thread to immediately shut down.
 
             Params:
@@ -710,10 +727,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         public void shutdown (void function (API) callback = null)
             @trusted
         {
-            if (isMainThread())
-                scheduler.start({ this.listen_chn.write(Variant(ShutdownCommand!API(callback, false))); });
-            else
-                this.listen_chn.write(Variant(ShutdownCommand!API(callback, false)));
+            sendToPeer(Variant(ShutdownCommand!API(callback, false)));
         }
 
         /***********************************************************************
@@ -733,10 +747,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         public void restart (void function (API) callback = null)
             @trusted
         {
-            if (isMainThread())
-                scheduler.start({ this.listen_chn.write(Variant(ShutdownCommand!API(callback, true))); });
-            else
-                this.listen_chn.write(Variant(ShutdownCommand!API(callback, true)));
+            sendToPeer(Variant(ShutdownCommand!API(callback, true)));
         }
 
         /***********************************************************************
@@ -757,10 +768,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
         public void sleep (Duration d, bool dropMessages = false) @trusted
         {
-            if (isMainThread())
-                scheduler.start({ this.listen_chn.write(Variant(TimeCommand(d, dropMessages))); });
-            else
-                this.listen_chn.write(Variant(TimeCommand(d, dropMessages)));
+            sendToPeer(Variant(TimeCommand(d, dropMessages)));
         }
 
         /***********************************************************************
@@ -839,10 +847,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                 enum mangled = getBestMatch!Overloads;
             }
 
-            if (isMainThread())
-                scheduler.start({ this.listen_chn.write(Variant(FilterAPI(mangled, pretty))); });
-            else
-                this.listen_chn.write(Variant(FilterAPI(mangled, pretty)));
+            sendToPeer(Variant(FilterAPI(mangled, pretty)));
         }
 
 
@@ -854,10 +859,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
         public void clearFilter () @trusted
         {
-            if (isMainThread())
-                scheduler.start({ this.listen_chn.write(Variant(FilterAPI(""))); });
-            else
-                this.listen_chn.write(Variant(FilterAPI("")));
+            sendToPeer(Variant(FilterAPI("")));
         }
 
         /***********************************************************************
