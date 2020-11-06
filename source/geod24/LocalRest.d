@@ -579,6 +579,8 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                                 if (e.callback !is null)
                                     e.callback(node);
                                 exc.restart = e.restart;
+                                if (!e.restart)
+                                    chn.close();
                                 throw exc;
                             case Variant.Type.timeCommand:
                                 TimeCommand s = msg.time;
@@ -621,7 +623,6 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                         break;
                 }
             }
-            chn.close();
         }
         catch (Throwable t)
         {
