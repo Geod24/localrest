@@ -964,6 +964,47 @@ class FiberScheduler
         return ThreadInfo.thisInfo;
     }
 
+    /// Resource type that will be tracked by FiberScheduler
+    interface Resource
+    {
+        ///
+        void release () nothrow;
+    }
+
+    /***********************************************************************
+
+        Add Resource to the Resource list of runnning Fiber
+
+        Param:
+            r = Resource instace
+
+    ***********************************************************************/
+
+    void addResource (Resource r, InfoFiber info_fiber = cast(InfoFiber) Fiber.getThis()) nothrow
+    {
+        assert(info_fiber, "Called from outside of an InfoFiber");
+        info_fiber.resources.insert(r);
+    }
+
+    /***********************************************************************
+
+        Remove Resource from the Resource list of runnning Fiber
+
+        Param:
+            r = Resource instance
+
+        Returns:
+            Success/failure
+
+    ***********************************************************************/
+
+    bool removeResource (Resource r, InfoFiber info_fiber = cast(InfoFiber) Fiber.getThis()) nothrow
+    {
+        assert(info_fiber, "Called from outside of an InfoFiber");
+        // TODO: For some cases, search is not neccesary. We can just pop the last element
+        return assumeWontThrow(info_fiber.resources.linearRemoveElement(r));
+    }
+
 protected:
     /**
      * Creates a new Fiber which calls the given delegate.
@@ -999,6 +1040,9 @@ protected:
 
         /// Semaphore reference that this Fiber is blocked on
         FiberBlocker blocker;
+
+        /// List of Resources held by this Fiber
+        DList!Resource resources;
 
         this (void delegate() op, size_t sz = 512 * 1024) nothrow
         {
@@ -1172,7 +1216,12 @@ private:
                     continue;
                 }
                 else if (t)
+                {
+                    // We are exiting the dispatch loop prematurely, all resources
+                    // held by Fibers should be released.
+                    this.releaseResources(cur_fiber);
                     throw t;
+                }
 
                 if (cur_fiber.state != Fiber.State.TERM)
                 {
@@ -1241,6 +1290,28 @@ private:
         }
 
         return earliest_timeout;
+    }
+
+    /***********************************************************************
+
+        Release all resources currently held by all Fibers owned by this
+        scheduler
+
+        Param:
+            cur_fiber = Running Fiber
+
+    ***********************************************************************/
+
+    void releaseResources (InfoFiber cur_fiber)
+    {
+        foreach (ref resource; cur_fiber.resources)
+            resource.release();
+        foreach (ref fiber; this.readyq)
+            foreach (ref resource; fiber.resources)
+                resource.release();
+        foreach (ref fiber; this.wait_list)
+            foreach (ref resource; fiber.resources)
+                resource.release();
     }
 
 private:
@@ -1725,6 +1796,8 @@ public SelectReturn select (ref SelectEntry[] read_list, ref SelectEntry[] write
 
     auto ss = new SelectState();
     int sel_id = 0;
+    thisScheduler().addResource(ss);
+    scope (exit) thisScheduler().removeResource(ss);
 
     read_list = read_list.randomShuffle();
     write_list = write_list.randomShuffle();
@@ -1753,7 +1826,7 @@ public SelectReturn select (ref SelectEntry[] read_list, ref SelectEntry[] write
 
 ***********************************************************************/
 
-final private class SelectState
+final private class SelectState : FiberScheduler.Resource
 {
     /// Shared blocker object for multiple ChannelQueueEntry objects
     FiberScheduler.FiberBlocker blocker;
@@ -1804,6 +1877,17 @@ final private class SelectState
     bool isConsumed () nothrow
     {
         return atomicLoad(this.consumed);
+    }
+
+    /***********************************************************************
+
+        Consume SelectState so that it is neutralized
+
+    ***********************************************************************/
+
+    void release () nothrow
+    {
+        this.tryConsume(-1, false);
     }
 
     /// ID of the select call that consumed this `SelectState`
@@ -1895,6 +1979,9 @@ final public class Channel (T) : Selectable
         if (!success && !this.closed)
         {
             ChannelQueueEntry q_ent = this.enqueueEntry(this.writeq, &val);
+            thisScheduler().addResource(q_ent);
+            scope (exit) thisScheduler().removeResource(q_ent);
+
             this.lock.unlock_nothrow();
             return q_ent.blocker.wait(duration) && q_ent.success;
         }
@@ -2026,6 +2113,9 @@ final public class Channel (T) : Selectable
         if (!success && !this.closed)
         {
             ChannelQueueEntry q_ent = this.enqueueEntry(this.readq, &output);
+            thisScheduler().addResource(q_ent);
+            scope (exit) thisScheduler().removeResource(q_ent);
+
             this.lock.unlock_nothrow();
             return q_ent.blocker.wait(duration) && q_ent.success;
         }
@@ -2193,7 +2283,7 @@ final public class Channel (T) : Selectable
 
     ***********************************************************************/
 
-    private class ChannelQueueEntry
+    private class ChannelQueueEntry : FiberScheduler.Resource
     {
         /// FiberBlocker blocking the `Fiber`
         FiberScheduler.FiberBlocker blocker;
@@ -2237,6 +2327,19 @@ final public class Channel (T) : Selectable
             this.success = false;
             if (!this.select_state || this.select_state.tryConsume(this.sel_id, this.success))
                 this.blocker.notify();
+        }
+
+
+        /***********************************************************************
+
+            Terminate ChannelQueueEntry so that it is neutralized
+
+        ***********************************************************************/
+
+        void release() nothrow
+        {
+            if (this.blocker.stopTimer())
+                this.pVal = null; // Sanitize pVal so that we can catch illegal accesses
         }
     }
 
