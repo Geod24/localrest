@@ -576,11 +576,11 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                                 break;
                             case Variant.Type.shutdownCommand:
                                 ShutdownCommand!API e = msg.shutdown;
+                                if (!e.restart)
+                                    chn.close();
                                 if (e.callback !is null)
                                     e.callback(node);
                                 exc.restart = e.restart;
-                                if (!e.restart)
-                                    chn.close();
                                 throw exc;
                             case Variant.Type.timeCommand:
                                 TimeCommand s = msg.time;
