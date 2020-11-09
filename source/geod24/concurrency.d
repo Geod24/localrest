@@ -41,6 +41,7 @@ public import std.variant;
 import core.atomic;
 import core.sync.condition;
 import core.sync.mutex;
+import core.sync.semaphore;
 import core.thread;
 import core.time : MonoTime;
 import std.range.primitives;
@@ -48,6 +49,7 @@ import std.traits;
 import std.algorithm;
 import std.typecons;
 import std.container : DList;
+import std.exception : assumeWontThrow;
 
 import geod24.RingBuffer;
 
@@ -251,6 +253,14 @@ class TidMissingException : Exception
     import std.exception : basicExceptionCtors;
     ///
     mixin basicExceptionCtors;
+}
+
+class FiberBlockedException : Exception
+{
+    this(string msg = "Fiber is blocked") @safe pure nothrow @nogc
+    {
+        super(msg);
+    }
 }
 
 // Thread ID
@@ -860,15 +870,22 @@ public void thisScheduler (FiberScheduler value) nothrow
  */
 class FiberScheduler
 {
+    /// Default ctor
+    this () nothrow
+    {
+        this.sem = assumeWontThrow(new Semaphore());
+        this.blocked_ex = new FiberBlockedException();
+    }
+
     /**
      * This creates a new Fiber for the supplied op and then starts the
      * dispatcher.
      */
     void start(void delegate() op)
     {
-        create(op);
+        create(op, true);
         // Make sure the just-created fiber is run first
-        dispatch(this.m_fibers.length - 1);
+        dispatch();
     }
 
     /**
@@ -913,6 +930,19 @@ class FiberScheduler
     }
 
     /**
+     * If the caller is a scheduled Fiber, this yields execution to another
+     * scheduled Fiber.
+     */
+    static void yieldAndThrow(Throwable t) nothrow
+    {
+        // NOTE: It's possible that we should test whether the calling Fiber
+        //       is an InfoFiber before yielding, but I think it's reasonable
+        //       that any fiber should yield here.
+        if (Fiber.getThis())
+            Fiber.yieldAndThrow(t);
+    }
+
+    /**
      * Returns an appropriate ThreadInfo instance.
      *
      * Returns a ThreadInfo instance specific to the calling Fiber if the
@@ -934,14 +964,57 @@ class FiberScheduler
         return ThreadInfo.thisInfo;
     }
 
+    /// Resource type that will be tracked by FiberScheduler
+    interface Resource
+    {
+        ///
+        void release () nothrow;
+    }
+
+    /***********************************************************************
+
+        Add Resource to the Resource list of runnning Fiber
+
+        Param:
+            r = Resource instace
+
+    ***********************************************************************/
+
+    void addResource (Resource r, InfoFiber info_fiber = cast(InfoFiber) Fiber.getThis()) nothrow
+    {
+        assert(info_fiber, "Called from outside of an InfoFiber");
+        info_fiber.resources.insert(r);
+    }
+
+    /***********************************************************************
+
+        Remove Resource from the Resource list of runnning Fiber
+
+        Param:
+            r = Resource instance
+
+        Returns:
+            Success/failure
+
+    ***********************************************************************/
+
+    bool removeResource (Resource r, InfoFiber info_fiber = cast(InfoFiber) Fiber.getThis()) nothrow
+    {
+        assert(info_fiber, "Called from outside of an InfoFiber");
+        // TODO: For some cases, search is not neccesary. We can just pop the last element
+        return assumeWontThrow(info_fiber.resources.linearRemoveElement(r));
+    }
+
 protected:
     /**
      * Creates a new Fiber which calls the given delegate.
      *
      * Params:
      *   op = The delegate the fiber should call
+     *   insert_front = Fiber will be added to the front
+     *                  of the ready queue to be run first
      */
-    void create (void delegate() op) nothrow
+    void create (void delegate() op, bool insert_front = false) nothrow
     {
         void wrap()
         {
@@ -952,7 +1025,10 @@ protected:
             op();
         }
 
-        m_fibers ~= new InfoFiber(&wrap);
+        if (insert_front)
+            this.readyq.insertFront(new InfoFiber(&wrap));
+        else
+            this.readyq.insertBack(new InfoFiber(&wrap));
     }
 
     /**
@@ -963,7 +1039,10 @@ protected:
         ThreadInfo info;
 
         /// Semaphore reference that this Fiber is blocked on
-        FiberBinarySemaphore sem;
+        FiberBlocker blocker;
+
+        /// List of Resources held by this Fiber
+        DList!Resource resources;
 
         this (void delegate() op, size_t sz = 512 * 1024) nothrow
         {
@@ -971,29 +1050,29 @@ protected:
         }
     }
 
-    final public class FiberBinarySemaphore
+    final public class FiberBlocker
     {
 
         /***********************************************************************
 
-            Associate `FiberBinarySemaphore` with the running `Fiber`
+            Associate `FiberBlocker` with the running `Fiber`
 
             `FiberScheduler` will check to see if the `Fiber` is blocking on a
-            `FiberBinarySemaphore` to avoid rescheduling it unnecessarily
+            `FiberBlocker` to avoid rescheduling it unnecessarily
 
         ***********************************************************************/
 
         private void registerToInfoFiber (InfoFiber info_fiber = cast(InfoFiber) Fiber.getThis()) nothrow
         {
             assert(info_fiber !is null, "This Fiber does not belong to FiberScheduler");
-            assert(info_fiber.sem is null, "This Fiber already has a registered FiberBinarySemaphore");
-            info_fiber.sem = this;
+            assert(info_fiber.blocker is null, "This Fiber already has a registered FiberBlocker");
+            info_fiber.blocker = this;
 
         }
 
         /***********************************************************************
 
-            Wait on the semaphore with optional timeout
+            Wait on the blocker with optional timeout
 
             Params:
                 period = Timeout period
@@ -1002,11 +1081,14 @@ protected:
 
         bool wait (Duration period = Duration.init) nothrow
         {
-            this.registerToInfoFiber();
             if (period != Duration.init)
                 this.limit = MonoTime.currTime + period;
 
-            FiberScheduler.yield();
+            if (this.shouldBlock())
+            {
+                this.registerToInfoFiber();
+                FiberScheduler.yieldAndThrow(this.outer.blocked_ex);
+            }
 
             this.limit = MonoTime.init;
             this.notified = false;
@@ -1015,7 +1097,7 @@ protected:
 
         /***********************************************************************
 
-            Unblock the Fiber waiting on this semaphore
+            Unblock the Fiber waiting on this blocker
 
         ***********************************************************************/
 
@@ -1023,13 +1105,14 @@ protected:
         {
             this.stopTimer();
             this.notified = true;
+            assumeWontThrow(this.outer.sem.notify());
         }
 
         /***********************************************************************
 
-            Query if `FiberBinarySemaphore` should still block
+            Query if `FiberBlocker` should still block
 
-            FiberBinarySemaphore will block the Fiber until it is notified or
+            FiberBlocker will block the Fiber until it is notified or
             the specified timeout is reached.
 
         ***********************************************************************/
@@ -1083,7 +1166,7 @@ protected:
         /// Time limit that will eventually unblock the caller if a timeout is specified
         MonoTime limit = MonoTime.init;
 
-        /// State of the semaphore
+        /// State of the blocker
         bool notified;
 
         /// State of the internal timer
@@ -1096,59 +1179,154 @@ private:
 
         Start the scheduling loop
 
-        Param:
-            pos = m_fibers index of the Fiber to execute first
-
     ***********************************************************************/
 
-    void dispatch(size_t pos = 0)
+    void dispatch ()
     {
-        import std.algorithm.mutation : remove;
-
         thisScheduler(this);
         scope (exit) thisScheduler(null);
 
-        assert(pos < m_fibers.length);
-        while (m_fibers.length > 0)
+        MonoTime earliest_timeout;
+
+        while (!this.readyq.empty() || !this.wait_list.empty())
         {
-            // Is Fiber waiting on a FiberBinarySemaphore?
-            if (auto sem = m_fibers[pos].sem)
+            while (!readyq.empty())
             {
-                // Is condition met?
-                // TRUE: Clear the sem and schedule the fiber
-                // FALSE: Skip it
-                if (sem.shouldBlock())
+                InfoFiber cur_fiber = this.readyq.front();
+                this.readyq.removeFront();
+
+                assert(cur_fiber.state != Fiber.State.TERM);
+
+                auto t = cur_fiber.call(Fiber.Rethrow.no);
+
+                // Fibers that block on a FiberBlocker throw an
+                // exception for scheduler to catch
+                if (t is this.blocked_ex)
                 {
-                    if (pos++ >= m_fibers.length - 1)
-                        pos = 0;
+                    auto cur_timeout = cur_fiber.blocker.getTimeout();
+
+                    // Keep track of the earliest timeout in the system
+                    if (cur_timeout != MonoTime.init
+                            && (earliest_timeout == MonoTime.init || cur_timeout < earliest_timeout))
+                    {
+                        earliest_timeout = cur_timeout;
+                    }
+
+                    this.wait_list.insert(cur_fiber);
                     continue;
                 }
-                else
+                else if (t)
                 {
-                    m_fibers[pos].sem = null;
+                    // We are exiting the dispatch loop prematurely, all resources
+                    // held by Fibers should be released.
+                    this.releaseResources(cur_fiber);
+                    throw t;
                 }
+
+                if (cur_fiber.state != Fiber.State.TERM)
+                {
+                    this.readyq.insert(cur_fiber);
+                }
+
+                // See if there are Fibers to be woken up if we reach a timeout
+                // or the scheduler semaphore was notified
+                if (MonoTime.currTime >= earliest_timeout || this.sem.tryWait())
+                    earliest_timeout = wakeFibers();
             }
 
-            auto t = m_fibers[pos].call(Fiber.Rethrow.no);
-            if (t !is null)
+            if (!this.wait_list.empty())
             {
-                throw t;
+                Duration time_to_timeout = earliest_timeout - MonoTime.currTime;
+
+                // Sleep until a timeout or an event
+                if (earliest_timeout == MonoTime.init)
+                    this.sem.wait();
+                else if (time_to_timeout > 0.seconds)
+                    this.sem.wait(time_to_timeout);
             }
-            if (m_fibers[pos].state == Fiber.State.TERM)
-            {
-                if (pos >= (m_fibers = remove(m_fibers, pos)).length)
-                    pos = 0;
-            }
-            else if (pos++ >= m_fibers.length - 1)
-            {
-                pos = 0;
-            }
+
+            // OS Thread woke up populate ready queue
+            earliest_timeout = wakeFibers();
         }
     }
 
+    /***********************************************************************
+
+        Move unblocked Fibers to ready queue
+
+        Return:
+            Returns the earliest timeout left in the waiting list
+
+    ***********************************************************************/
+
+    MonoTime wakeFibers()
+    {
+        import std.range;
+        MonoTime earliest_timeout;
+
+        auto wait_range = this.wait_list[];
+        while (!wait_range.empty)
+        {
+            auto fiber = wait_range.front;
+
+            // Remove the unblocked Fiber from wait list and
+            // append it to the end ofready queue
+            if (!fiber.blocker.shouldBlock())
+            {
+                this.wait_list.popFirstOf(wait_range);
+                fiber.blocker = null;
+                this.readyq.insert(fiber);
+            }
+            else
+            {
+                auto timeout = fiber.blocker.getTimeout();
+                if (timeout != MonoTime.init
+                        && (earliest_timeout == MonoTime.init || timeout < earliest_timeout))
+                {
+                    earliest_timeout = timeout;
+                }
+                wait_range.popFront();
+            }
+        }
+
+        return earliest_timeout;
+    }
+
+    /***********************************************************************
+
+        Release all resources currently held by all Fibers owned by this
+        scheduler
+
+        Param:
+            cur_fiber = Running Fiber
+
+    ***********************************************************************/
+
+    void releaseResources (InfoFiber cur_fiber)
+    {
+        foreach (ref resource; cur_fiber.resources)
+            resource.release();
+        foreach (ref fiber; this.readyq)
+            foreach (ref resource; fiber.resources)
+                resource.release();
+        foreach (ref fiber; this.wait_list)
+            foreach (ref resource; fiber.resources)
+                resource.release();
+    }
+
 private:
-    /// List of `InfoFiber`s currently in the system
-    InfoFiber[] m_fibers;
+
+    /// OS semaphore for scheduler to sleep on
+    Semaphore sem;
+
+    /// A FIFO Queue of Fibers ready to run
+    DList!InfoFiber readyq;
+
+    /// List of Fibers waiting for an event
+    DList!InfoFiber wait_list;
+
+    /// Cached instance of FiberBlockedException
+    FiberBlockedException blocked_ex;
 }
 
 /// Ensure argument to `start` is run first
@@ -1612,12 +1790,14 @@ public alias SelectReturn = Tuple!(bool, "success", int, "id");
 
 ***********************************************************************/
 
-public SelectReturn select (ref SelectEntry[] read_list, ref SelectEntry[] write_list)
+public SelectReturn select (ref SelectEntry[] read_list, ref SelectEntry[] write_list, Duration timeout = Duration.init)
 {
     import std.random : randomShuffle;
 
     auto ss = new SelectState();
     int sel_id = 0;
+    thisScheduler().addResource(ss);
+    scope (exit) thisScheduler().removeResource(ss);
 
     read_list = read_list.randomShuffle();
     write_list = write_list.randomShuffle();
@@ -1632,7 +1812,8 @@ public SelectReturn select (ref SelectEntry[] read_list, ref SelectEntry[] write
         entry.selectable.selectWrite(entry.select_data, ss, sel_id++);
     }
 
-    ss.sem.wait();
+    if (!ss.blocker.wait(timeout))
+        return SelectReturn(false, -1); // Timed out
 
     return SelectReturn(ss.success, ss.id);
 }
@@ -1645,10 +1826,10 @@ public SelectReturn select (ref SelectEntry[] read_list, ref SelectEntry[] write
 
 ***********************************************************************/
 
-final private class SelectState
+final private class SelectState : FiberScheduler.Resource
 {
-    /// Shared semaphore object for multiple ChannelQueueEntry objects
-    FiberScheduler.FiberBinarySemaphore sem;
+    /// Shared blocker object for multiple ChannelQueueEntry objects
+    FiberScheduler.FiberBlocker blocker;
 
     /***********************************************************************
 
@@ -1658,7 +1839,7 @@ final private class SelectState
 
     this () nothrow
     {
-        this.sem = thisScheduler().new FiberBinarySemaphore();
+        this.blocker = thisScheduler().new FiberBlocker();
     }
 
     /***********************************************************************
@@ -1696,6 +1877,17 @@ final private class SelectState
     bool isConsumed () nothrow
     {
         return atomicLoad(this.consumed);
+    }
+
+    /***********************************************************************
+
+        Consume SelectState so that it is neutralized
+
+    ***********************************************************************/
+
+    void release () nothrow
+    {
+        this.tryConsume(-1, false);
     }
 
     /// ID of the select call that consumed this `SelectState`
@@ -1787,8 +1979,11 @@ final public class Channel (T) : Selectable
         if (!success && !this.closed)
         {
             ChannelQueueEntry q_ent = this.enqueueEntry(this.writeq, &val);
+            thisScheduler().addResource(q_ent);
+            scope (exit) thisScheduler().removeResource(q_ent);
+
             this.lock.unlock_nothrow();
-            return q_ent.sem.wait(duration) && q_ent.success;
+            return q_ent.blocker.wait(duration) && q_ent.success;
         }
 
         this.lock.unlock_nothrow();
@@ -1827,7 +2022,7 @@ final public class Channel (T) : Selectable
         if (ChannelQueueEntry readq_ent = this.dequeueEntry(this.readq, caller_sel, caller_sel_id))
         {
             *readq_ent.pVal = val;
-            readq_ent.sem.notify();
+            readq_ent.blocker.notify();
             return true;
         }
 
@@ -1870,7 +2065,7 @@ final public class Channel (T) : Selectable
         if (success || this.closed || sel_state.id == -1)
         {
             this.lock.unlock_nothrow();
-            sel_state.sem.notify();
+            sel_state.blocker.notify();
         }
         else
             this.lock.unlock_nothrow();
@@ -1918,8 +2113,11 @@ final public class Channel (T) : Selectable
         if (!success && !this.closed)
         {
             ChannelQueueEntry q_ent = this.enqueueEntry(this.readq, &output);
+            thisScheduler().addResource(q_ent);
+            scope (exit) thisScheduler().removeResource(q_ent);
+
             this.lock.unlock_nothrow();
-            return q_ent.sem.wait(duration) && q_ent.success;
+            return q_ent.blocker.wait(duration) && q_ent.success;
         }
 
         this.lock.unlock_nothrow();
@@ -1982,7 +2180,7 @@ final public class Channel (T) : Selectable
         }
 
         if (write_ent)
-            write_ent.sem.notify();
+            write_ent.blocker.notify();
         return true;
     }
 
@@ -2014,7 +2212,7 @@ final public class Channel (T) : Selectable
         if (success || this.closed || sel_state.id == -1)
         {
             this.lock.unlock_nothrow();
-            sel_state.sem.notify();
+            sel_state.blocker.notify();
         }
         else
             this.lock.unlock_nothrow();
@@ -2085,10 +2283,10 @@ final public class Channel (T) : Selectable
 
     ***********************************************************************/
 
-    private class ChannelQueueEntry
+    private class ChannelQueueEntry : FiberScheduler.Resource
     {
-        /// Semaphore blocking the `Fiber`
-        FiberScheduler.FiberBinarySemaphore sem;
+        /// FiberBlocker blocking the `Fiber`
+        FiberScheduler.FiberBlocker blocker;
 
         /// Pointer to the variable that we will read to/from
         T* pVal;
@@ -2109,9 +2307,9 @@ final public class Channel (T) : Selectable
             this.sel_id = sel_id;
 
             if (this.select_state)
-                this.sem = this.select_state.sem;
+                this.blocker = this.select_state.blocker;
             else
-                this.sem = thisScheduler().new FiberBinarySemaphore();
+                this.blocker = thisScheduler().new FiberBlocker();
         }
 
         /***********************************************************************
@@ -2128,7 +2326,20 @@ final public class Channel (T) : Selectable
         {
             this.success = false;
             if (!this.select_state || this.select_state.tryConsume(this.sel_id, this.success))
-                this.sem.notify();
+                this.blocker.notify();
+        }
+
+
+        /***********************************************************************
+
+            Terminate ChannelQueueEntry so that it is neutralized
+
+        ***********************************************************************/
+
+        void release() nothrow
+        {
+            if (this.blocker.stopTimer())
+                this.pVal = null; // Sanitize pVal so that we can catch illegal accesses
         }
     }
 
@@ -2193,7 +2404,7 @@ final public class Channel (T) : Selectable
             ChannelQueueEntry qent = entryq.front();
             auto peer_sel = qent.select_state;
 
-            if ((!peer_sel || !peer_sel.isConsumed()) && qent.sem.shouldBlock())
+            if ((!peer_sel || !peer_sel.isConsumed()) && qent.blocker.shouldBlock())
             {
                 // If we are in a select call, try to consume the caller select
                 // if we can't consume the caller select, no need to continue
@@ -2206,7 +2417,7 @@ final public class Channel (T) : Selectable
                 // Try to consume the peer select if it exists
                 // If peer_sel was consumed by someone else, tough luck
                 // In that case, whole select will fail since we consumed the caller_sel
-                if ((!peer_sel || peer_sel.tryConsume(qent.sel_id)) && qent.sem.stopTimer())
+                if ((!peer_sel || peer_sel.tryConsume(qent.sel_id)) && qent.blocker.stopTimer())
                 {
                     entryq.removeFront();
                     return qent;
