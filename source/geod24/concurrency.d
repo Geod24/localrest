@@ -1790,7 +1790,7 @@ public alias SelectReturn = Tuple!(bool, "success", int, "id");
 
 ***********************************************************************/
 
-public SelectReturn select (ref SelectEntry[] read_list, ref SelectEntry[] write_list)
+public SelectReturn select (ref SelectEntry[] read_list, ref SelectEntry[] write_list, Duration timeout = Duration.init)
 {
     import std.random : randomShuffle;
 
@@ -1812,7 +1812,8 @@ public SelectReturn select (ref SelectEntry[] read_list, ref SelectEntry[] write
         entry.selectable.selectWrite(entry.select_data, ss, sel_id++);
     }
 
-    ss.blocker.wait();
+    if (!ss.blocker.wait(timeout))
+        return SelectReturn(false, -1); // Timed out
 
     return SelectReturn(ss.success, ss.id);
 }
