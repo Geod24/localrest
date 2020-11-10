@@ -1612,8 +1612,13 @@ public alias SelectReturn = Tuple!(bool, "success", int, "id");
 
 public SelectReturn select (ref SelectEntry[] read_list, ref SelectEntry[] write_list)
 {
+    import std.random : randomShuffle;
+
     auto ss = new SelectState();
     int sel_id = 0;
+
+    read_list = read_list.randomShuffle();
+    write_list = write_list.randomShuffle();
 
     foreach(ref entry; read_list)
     {
