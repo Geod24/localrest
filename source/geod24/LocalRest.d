@@ -110,6 +110,17 @@ import std.traits : fullyQualifiedName, Parameters, ReturnType;
 import core.thread;
 import core.time;
 
+/// Data sent by the caller
+private struct Command
+{
+    /// Sequence id of Command
+    size_t id;
+    /// Method to call
+    string method;
+    /// Serialized arguments to the method
+    SerializedData args;
+}
+
 /// Ask the node to exhibit a certain behavior for a given time
 private struct TimeCommand
 {
@@ -117,6 +128,16 @@ private struct TimeCommand
     Duration dur;
     /// Whether or not affected messages should be dropped
     bool drop = false;
+}
+
+/// Ask the node to shut down
+private struct ShutdownCommand
+{
+    /// Any callback to call before the Node's destructor is called
+    void function (Object) callback;
+
+    /// Whether we're restarting or really shutting down
+    bool restart;
 }
 
 /// Filter out requests before they reach a node
@@ -150,6 +171,8 @@ private struct Response
 {
     /// Final status of a request (failed, timeout, success, etc)
     Status status;
+    /// Response id
+    size_t id;
     /// If `status == Status.Success`, the serialized return value.
     /// Otherwise, it contains `Exception.toString()`.
     SerializedData data;
@@ -176,6 +199,196 @@ private struct ArgWrapper (T...)
     T args;
 }
 
+// very simple & limited variant, to keep it performant.
+// should be replaced by a real Variant later
+private struct Variant
+{
+    this (Command msg) { this.cmd = msg; this.tag = Variant.Type.command; }
+    this (Response msg) { this.res = msg; this.tag = Variant.Type.response; }
+    this (FilterAPI msg) { this.filter = msg; this.tag = Variant.Type.filter; }
+    this (TimeCommand msg) { this.time = msg; this.tag = Variant.Type.timeCommand; }
+    this (ShutdownCommand msg) { this.shutdown = msg; this.tag = Variant.Type.shutdownCommand; }
+
+    union
+    {
+        Command cmd;
+        Response res;
+        FilterAPI filter;
+        TimeCommand time;
+        ShutdownCommand shutdown;
+    }
+
+    Type tag;
+
+    /// Type of a request
+    enum Type : ubyte
+    {
+        command,
+        response,
+        filter,
+        timeCommand,
+        shutdownCommand,
+    }
+}
+
+private alias CommandChn = C.Channel!Variant;
+private alias RespChn = C.Channel!Response;
+
+/// Represents a connection between a server and a client
+private class Connection
+{
+    ///
+    this () @trusted nothrow
+    {
+        this.command_chn = new CommandChn();
+        this.resp_chn = new RespChn();
+    }
+
+    /*******************************************************************************
+
+        Send a message over the Connection
+
+        Params:
+            T = Type of the message, should be support by the `Variant` type
+            msg = Message to be sent
+
+        Returns:
+            Success/failure
+
+    *******************************************************************************/
+
+    bool sendCommand (T) (T msg) @trusted
+    {
+        bool ret;
+
+        if (isMainThread())
+            scheduler.start({ ret = this.command_chn.write(Variant(msg)); });
+        else
+            ret = this.command_chn.write(Variant(msg));
+
+        return ret;
+    }
+
+    /*******************************************************************************
+
+        Get a unique id for a `Command` to be sent from this `Connection`
+
+        Returns:
+            Unique Command id
+
+    *******************************************************************************/
+
+    size_t getNextCommandId () @safe
+    {
+        return this.next_cmd_id++;
+    }
+
+    /*******************************************************************************
+
+        Wait for a `Response` with specific id
+
+        Params:
+            resp_id = Response id to wait for
+            timeout = optional timeout duration for the operation
+
+        Returns:
+            Response
+
+    *******************************************************************************/
+
+    Response waitResponse (size_t resp_id, Duration timeout = Duration.init) @trusted
+    {
+        if (isMainThread())
+        {
+            Response res;
+            scheduler.start({
+                // Loop until we get the Response we are looking for
+                while (this.resp_chn.read(res, timeout))
+                    if (res.id == resp_id)
+                        return;
+                res = Response(Status.Timeout, resp_id, SerializedData("Request timed-out"));
+            });
+            return res;
+        }
+        else
+        {
+            // Response may already be ready
+            if (auto existing_res = (resp_id in this.waiting_list))
+                return existing_res.res;
+
+            // Block while waiting the Response
+            auto blocker = C.thisScheduler().new FiberBlocker();
+            this.waiting_list[resp_id] = Waiting(blocker);
+            if (blocker.wait(timeout))
+                return this.waiting_list[resp_id].res;
+            else
+                return Response(Status.Timeout, resp_id, SerializedData("Request timed-out"));
+        }
+    }
+
+    /*******************************************************************************
+
+        Notify the task waiting for a Response
+
+        Params:
+            res = Newly arrived Response
+
+    *******************************************************************************/
+
+    void notifyWaiter (Response res)
+    {
+        // Is the waiting Fiber already blocked?
+        if (auto waiter = (res.id in this.waiting_list))
+        {
+            waiter.res = res;
+            waiter.blocker.notify();
+        }
+        else // Fiber is not yet blocked, create an entry for the related Fiber to use
+            this.waiting_list[res.id] = Waiting(null, res);
+    }
+
+    /*******************************************************************************
+
+        Close the `Channel`s associated with this `Connection`. Blocked `waitResponse`
+        calls will timeout and blocked `sendCommand` calls will fail
+
+    *******************************************************************************/
+
+    void close ()
+    {
+        this.command_chn.close();
+        this.resp_chn.close();
+    }
+
+    ///
+    private struct Waiting
+    {
+        C.FiberScheduler.FiberBlocker blocker;
+        Response res;
+    }
+
+    /// List of Fibers waiting for a Response from this Connection
+    private Waiting[size_t] waiting_list;
+
+    /// Next Command ID
+    private size_t next_cmd_id;
+
+    /// Channel to send `Command`s to
+    private CommandChn command_chn;
+
+    /// Channel to read `Response`s from
+    private RespChn resp_chn;
+}
+
+/// `Channel` type that the nodes will listen for new `Connection`s
+public alias BindChn = C.Channel!Connection;
+
+/// Thread local outgoing `Connection` list
+private Connection[RespChn] outgoing_conns;
+
+/// Thread local incoming `Connection` list
+private Connection[CommandChn] incoming_conns;
+
 /// We need a scheduler to simulate an event loop and to be re-entrant
 private C.FiberScheduler scheduler;
 
@@ -189,7 +402,7 @@ private C.FiberScheduler scheduler;
 
 ***********************************************************************/
 
-private bool isMainThread() nothrow
+private bool isMainThread () @trusted nothrow
 {
     // we are in the main thread
     if (scheduler is null)
@@ -330,61 +543,6 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 {
     static assert (!serializerInvalidReason!(S).length, serializerInvalidReason!S);
 
-    alias RestChannel = C.Channel!Variant;
-
-    /// Ask the node to shut down
-    private struct ShutdownCommand (API)
-    {
-        /// Any callback to call before the Node's destructor is called
-        void function (API) callback;
-
-        /// Whether we're restarting or really shutting down
-        bool restart;
-    }
-
-    /// Data sent by the caller
-    private struct Command
-    {
-        /// Channel to be used when responding to this Command
-        RestChannel resp_chn;
-        /// Method to call
-        string method;
-        /// Serialized arguments to the method
-        SerializedData args;
-    }
-
-    // very simple & limited variant, to keep it performant.
-    // should be replaced by a real Variant later
-    static struct Variant
-    {
-        this (Command msg) { this.cmd = msg; this.tag = Variant.Type.command; }
-        this (Response msg) { this.res = msg; this.tag = Variant.Type.response; }
-        this (FilterAPI msg) { this.filter = msg; this.tag = Variant.Type.filter; }
-        this (TimeCommand msg) { this.time = msg; this.tag = Variant.Type.timeCommand; }
-        this (ShutdownCommand!API msg) { this.shutdown = msg; this.tag = Variant.Type.shutdownCommand; }
-
-        union
-        {
-            Command cmd;
-            Response res;
-            FilterAPI filter;
-            TimeCommand time;
-            ShutdownCommand!API shutdown;
-        }
-
-        Type tag;
-
-        /// Type of a request
-        enum Type : ubyte
-        {
-            command,
-            response,
-            filter,
-            timeCommand,
-            shutdownCommand,
-        }
-    }
-
     /***************************************************************************
 
         Instantiate a node and start it
@@ -415,7 +573,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         CtorParams!Impl args, Duration timeout = Duration.init,
         string file = __FILE__, int line = __LINE__)
     {
-        auto chn = new RestChannel(16);
+        auto chn = new BindChn();
         new Thread(
         {
             spawned!(Impl)(chn, file, line, args);
@@ -443,10 +601,11 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
             cmd    = the command to run (contains the method name and the arguments)
             node   = the node to invoke the method on
             filter = used for filtering API calls (returns default response)
+            resp_chn = `Channel` to send the `Response` to
 
     ***************************************************************************/
 
-    private static void handleCommand (Command cmd, API node, FilterAPI filter)
+    private static void handleCommand (Command cmd, API node, FilterAPI filter, RespChn resp_chn)
     {
         switch (cmd.method)
         {
@@ -456,7 +615,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                 mixin(
                 q{
                     case `%2$s`:
-                    Response res = Response(Status.Failed);
+                    Response res = Response(Status.Failed, cmd.id);
 
                     // Provide informative message in case of filtered method
                     if (cmd.method == filter.func_mangleof)
@@ -481,14 +640,12 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                         }
                     }
 
-                    cmd.resp_chn.write(Variant(res));
-                    cmd.resp_chn.close();
+                    resp_chn.write(res);
                     return;
                 }.format(member, ovrld.mangleof));
             }
         default:
-            cmd.resp_chn.write(Variant(Response(Status.ClientFailed, SerializedData("Method not found"))));
-            cmd.resp_chn.close();
+            resp_chn.write(Response(Status.ClientFailed, cmd.id, SerializedData("Method not found")));
             break;
         }
     }
@@ -503,7 +660,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
        Params:
            Implementation = Type of the implementation to instantiate
-           chn = The channel on which to "listen" to receive new "connections"
+           bind_chn = The channel on which to "listen" to receive new "connections"
            file = Path to the file that spawned this node
            line = Line number in the `file` that spawned this node
            cargs = Arguments to `Implementation`'s constructor
@@ -511,7 +668,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
     ***************************************************************************/
 
     private static void spawned (Implementation) (
-        RestChannel chn, string file, int line, CtorParams!Implementation cargs)
+        BindChn bind_chn, string file, int line, CtorParams!Implementation cargs)
         nothrow
     {
         import std.datetime.systime : Clock, SysTime;
@@ -553,31 +710,83 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
             // Control the node behavior
             Control control;
 
+            struct AwaitingMessage
+            {
+                /// Message
+                Variant var;
+                /// Originating `Connection`
+                Connection conn;
+            }
             // we need to keep track of messages which were ignored when
             // node.sleep() was used, and then handle each message in sequence.
-            Variant[] await_msgs;
+            AwaitingMessage[] await_msgs;
 
             scheduler.start(() {
-                while (1)
+                C.SelectEntry[] read_list;
+                C.SelectEntry[] write_list;
+
+                while (true)
                 {
+                    Connection new_conn;
+                    Response res;
                     Variant msg;
-                    if (chn.read(msg, 10.msecs))
+
+                    read_list.length = 0;
+                    assumeSafeAppend(read_list);
+                    write_list.length = 0;
+                    assumeSafeAppend(write_list);
+
+                    foreach (ref conn; incoming_conns)
+                        if (!conn.command_chn.isClosed())
+                            read_list ~= C.SelectEntry(conn.command_chn, &msg);
+                    foreach (ref conn; outgoing_conns)
+                        if (!conn.resp_chn.isClosed())
+                            read_list ~= C.SelectEntry(conn.resp_chn, &res);
+                    read_list ~= C.SelectEntry(bind_chn, &new_conn);
+
+                    auto sel_ret = C.select(read_list, write_list, 10.msecs);
+
+                    if (!control.isSleeping())
                     {
+                        foreach (ref await_msg; await_msgs)
+                            handleCommand(await_msg.var.cmd, node, control.filter, await_msg.conn.resp_chn);
+                        await_msgs.length = 0;
+                        assumeSafeAppend(await_msgs);
+                    }
+
+                    if (!sel_ret.success)
+                        continue;
+
+                    // Bind chn
+                    if (cast(BindChn) read_list[sel_ret.id].selectable)
+                    {
+                        incoming_conns[new_conn.command_chn] = new_conn;
+                    }
+                    // Command
+                    else if (auto comm_chn = cast(CommandChn) read_list[sel_ret.id].selectable)
+                    {
+                        auto curr_conn = incoming_conns[comm_chn];
                         switch (msg.tag)
                         {
                             case Variant.Type.command:
                                 Command cmd = msg.cmd;
                                 if (!control.isSleeping())
                                     scheduler.spawn({
-                                        handleCommand(cmd, node, control.filter);
+                                        handleCommand(cmd, node, control.filter, curr_conn.resp_chn);
                                     });
                                 else if (!control.drop)
-                                    await_msgs ~= msg;
+                                    await_msgs ~= AwaitingMessage(msg, curr_conn);
                                 break;
                             case Variant.Type.shutdownCommand:
-                                ShutdownCommand!API e = msg.shutdown;
+                                ShutdownCommand e = msg.shutdown;
                                 if (!e.restart)
-                                    chn.close();
+                                {
+                                    bind_chn.close();
+                                    incoming_conns.each!((conn) => conn.close());
+                                }
+                                outgoing_conns.each!((conn) => conn.close());
+                                outgoing_conns.clear();
+
                                 if (e.callback !is null)
                                     e.callback(node);
                                 exc.restart = e.restart;
@@ -595,17 +804,10 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                                 assert(0, "Got invalid Variant.Type: " ~ msg.tag);
                         }
                     }
-
-                    // now handle any leftover messages after any sleep() call
-                    if (!control.isSleeping())
+                    else if (auto resp_chn = cast(RespChn) read_list[sel_ret.id].selectable)
                     {
-                        foreach (ref await_msg; await_msgs)
-                        {
-                            if (await_msg.tag == Variant.Type.command)
-                                handleCommand(await_msg.cmd, node, control.filter);
-                        }
-                        await_msgs.length = 0;
-                        assumeSafeAppend(await_msgs);
+                        // Response
+                        outgoing_conns[resp_chn].notifyWaiter(res);
                     }
                 }
             });
@@ -642,7 +844,10 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
     private const Duration timeout;
 
     /// Main Channel that this Node will listen for incoming messages
-    private RestChannel listen_chn;
+    private BindChn bind_chn;
+
+    /// Connection between this instance and the node main thread
+    private Connection conn;
 
     /***************************************************************************
 
@@ -652,18 +857,28 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         In order to instantiate a node, see the static `spawn` function.
 
         Params:
-          listen_chn = `RestChannel` of the node.
+          bind_chn = `BindChn` of the node.
                 This can usually be obtained by `geod24.concurrency.locate`.
           timeout = any timeout to use
 
     ***************************************************************************/
 
-    public this (Object listen_chn, Duration timeout = Duration.init)
-        @safe @nogc pure nothrow
+    public this (BindChn bind_chn, Duration timeout = Duration.init) @trusted nothrow
     {
-        this.listen_chn = cast(RestChannel) listen_chn;
+        import std.exception : assumeWontThrow;
+
+        this.bind_chn = bind_chn;
         this.timeout = timeout;
-        assert(this.listen_chn);
+        assert(bind_chn);
+
+        // Create a new Connection, register it and send it to the peer
+        // TODO: What to do when bind_chn is closed?
+        this.conn = new Connection();
+        outgoing_conns[this.conn.resp_chn] = this.conn;
+        if (isMainThread())
+            assumeWontThrow(scheduler.start({ bind_chn.write(this.conn); }));
+        else
+            bind_chn.write(this.conn);
     }
 
     /***************************************************************************
@@ -684,34 +899,16 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
     {
         /***********************************************************************
 
-            Returns the `Tid` this `RemoteAPI` wraps
+            Returns the `BindChn` main thread of this `RemoteAPI` listens to
+            for new `Connections`
 
             This can be useful for calling `geod24.concurrency.register` or similar.
-            Note that the `Tid` should not be used directly, as our event loop,
-            would error out on an unknown message.
 
         ***********************************************************************/
 
-        public RestChannel chn () @nogc pure nothrow
+        public BindChn chn () @nogc pure nothrow
         {
-            return this.listen_chn;
-        }
-
-        /***********************************************************************
-
-            Send `Variant` to peer in a Fiber
-
-            Param:
-                var = `Variant` to send
-
-        ***********************************************************************/
-
-        private void sendToPeer (Variant var)
-        {
-            if (isMainThread())
-                scheduler.start({ this.listen_chn.write(var); });
-            else
-                this.listen_chn.write(var);
+            return this.bind_chn;
         }
 
         /***********************************************************************
@@ -725,10 +922,10 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
         ***********************************************************************/
 
-        public void shutdown (void function (API) callback = null)
+        public void shutdown (void function (Object) callback = null)
             @trusted
         {
-            sendToPeer(Variant(ShutdownCommand!API(callback, false)));
+            this.conn.sendCommand(ShutdownCommand(callback, false));
         }
 
         /***********************************************************************
@@ -745,19 +942,15 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
         ***********************************************************************/
 
-        public void restart (void function (API) callback = null)
+        public void restart (void function (Object) callback = null)
             @trusted
         {
-            sendToPeer(Variant(ShutdownCommand!API(callback, true)));
+            this.conn.sendCommand(ShutdownCommand(callback, true));
         }
 
         /***********************************************************************
 
             Make the remote node sleep for `Duration`
-
-            The remote node will call `Thread.sleep`, becoming completely
-            unresponsive, potentially having multiple tasks hanging.
-            This is useful to simulate a delay or a network outage.
 
             Params:
               delay = Duration the node will sleep for
@@ -769,7 +962,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
         public void sleep (Duration d, bool dropMessages = false) @trusted
         {
-            sendToPeer(Variant(TimeCommand(d, dropMessages)));
+            this.conn.sendCommand(TimeCommand(d, dropMessages));
         }
 
         /***********************************************************************
@@ -848,7 +1041,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                 enum mangled = getBestMatch!Overloads;
             }
 
-            sendToPeer(Variant(FilterAPI(mangled, pretty)));
+            this.conn.sendCommand(FilterAPI(mangled, pretty));
         }
 
 
@@ -860,7 +1053,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
         public void clearFilter () @trusted
         {
-            sendToPeer(Variant(FilterAPI("")));
+            this.conn.sendCommand(FilterAPI(""));
         }
 
         /***********************************************************************
@@ -883,7 +1076,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
         public void withTimeout (Dg) (Duration timeout, scope Dg dg)
         {
-            scope api = new RemoteAPI(this.listen_chn, timeout);
+            scope api = new RemoteAPI(this.bind_chn, timeout);
             static assert(is(typeof({ dg(api); })),
                           "Provided argument of type `" ~ Dg.stringof ~
                           "` is not callable with argument type `scope " ~
@@ -912,28 +1105,11 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                     // this overload needs to be
                     auto res = () @trusted {
                         auto serialized = S.serialize(ArgWrapper!(Parameters!ovrld)(params));
-                        auto resp_chn = new RestChannel(4);
-                        auto command = Command(resp_chn, ovrld.mangleof, SerializedData(serialized));
+                        auto command = Command(this.conn.getNextCommandId(), ovrld.mangleof, SerializedData(serialized));
 
-                        Response sendCommandAndWaitResponse ()
-                        {
-                            Variant var;
-                            if(!this.listen_chn.write(Variant(command)))
-                                throw new Exception("Connection with peer closed");
-                            if (resp_chn.read(var, this.timeout))
-                                return var.res;
-                            else
-                                return Response(Status.Timeout, SerializedData("Request timed-out"));
-                        }
-
-                        Response res;
-                        // for the main thread, we run the "event loop" until
-                        // the request we're interested in receives a response.
-                        if (isMainThread())
-                            scheduler.start({ res = sendCommandAndWaitResponse(); });
-                        else
-                            res = sendCommandAndWaitResponse();
-                        return res;
+                        if(!this.conn.sendCommand(command))
+                            throw new Exception("Connection with peer closed");
+                        return this.conn.waitResponse(command.id, this.timeout);
                     }();
 
                     if (res.status == Status.Failed)
@@ -1007,7 +1183,7 @@ unittest
         ~this () { dtor_called = true; }
     }
 
-    static void onDestroy (API node)
+    static void onDestroy (Object node)
     {
         assert(!dtor_called);
         auto mock = cast(MockAPI)node;
@@ -1147,7 +1323,7 @@ unittest
     static class SlaveNode : API
     {
         @safe:
-        this(Object masterChn)
+        this(BindChn masterChn)
         {
             this.master = new RemoteAPI!API(masterChn);
         }
@@ -1199,7 +1375,7 @@ unittest
 {
     static import geod24.concurrency;
 
-    __gshared Object[string] tbn;
+    __gshared BindChn[string] tbn;
 
     static interface API
     {
@@ -1329,7 +1505,7 @@ unittest
 // Simulate temporary outage
 unittest
 {
-    __gshared Object n1chn;
+    __gshared BindChn n1chn;
 
     static interface API
     {
@@ -1400,8 +1576,7 @@ unittest
 // Filter commands
 unittest
 {
-    __gshared Object node_chn;
-
+    __gshared BindChn node_chn;
     static interface API
     {
         size_t fooCount();
@@ -1422,11 +1597,6 @@ unittest
         size_t bar_count;
         RemoteAPI!API remote;
 
-        public this()
-        {
-            this.remote = new RemoteAPI!API(node_chn);
-        }
-
         override size_t fooCount() { return this.foo_count; }
         override size_t fooIntCount() { return this.foo_int_count; }
         override size_t barCount() { return this.bar_count; }
@@ -1439,6 +1609,9 @@ unittest
 
         override void callFoo()
         {
+            if (!this.remote)
+                this.remote = new RemoteAPI!API(node_chn);
+
             try
             {
                 this.remote.foo();
@@ -1451,6 +1624,9 @@ unittest
 
         override void callFoo(int arg)
         {
+            if (!this.remote)
+                this.remote = new RemoteAPI!API(node_chn);
+
             try
             {
                 this.remote.foo(arg);
@@ -1463,6 +1639,9 @@ unittest
 
         override void callBar(int arg)
         {
+            if (!this.remote)
+                this.remote = new RemoteAPI!API(node_chn);
+
             try
             {
                 this.remote.bar(arg);
@@ -1587,7 +1766,7 @@ unittest
     assert(called);
 
     // Test that attributes are inferred based on the delegate
-    void doTest () @safe pure nothrow @nogc
+    void doTest () @safe nothrow
     {
         called = false;
         node.ctrl.withTimeout(Duration.zero,
@@ -1663,7 +1842,7 @@ unittest
     static import geod24.concurrency;
     import std.exception;
 
-    __gshared Object node_chn;
+    __gshared BindChn node_chn;
 
     static interface API
     {
@@ -1704,7 +1883,7 @@ unittest
     static import geod24.concurrency;
     import std.exception;
 
-    __gshared Object node_chn;
+    __gshared BindChn node_chn;
 
     static interface API
     {
@@ -1747,7 +1926,7 @@ unittest
     static import geod24.concurrency;
     import std.exception;
 
-    __gshared Object node_chn;
+    __gshared BindChn node_chn;
 
     static interface API
     {
@@ -1779,13 +1958,14 @@ unittest
     thread_joinAll();
 }
 
+
 // Test a node that gets a replay while it's delayed
 unittest
 {
     static import geod24.concurrency;
     import std.exception;
 
-    __gshared Object node_chn;
+    __gshared BindChn node_chn;
 
     static interface API
     {
@@ -1859,7 +2039,7 @@ unittest
 {
     import core.thread : thread_joinAll;
     static import geod24.concurrency;
-    __gshared Object node_chn;
+    __gshared BindChn node_chn;
 
     static interface API
     {
@@ -1966,8 +2146,8 @@ unittest
         public void call2 ();
     }
 
-    __gshared Object node1Chn;
-    __gshared Object node2Chn;
+    __gshared BindChn node1Chn;
+    __gshared BindChn node2Chn;
 
     static class Node : API
     {
@@ -2136,7 +2316,7 @@ unittest
         public void call1 ();
     }
 
-    __gshared Object node2Chn;
+    __gshared BindChn node2Chn;
     static shared bool done;
 
     static class Node : API
@@ -2224,7 +2404,7 @@ unittest
     node.ctrl.shutdown();
     thread_joinAll();
 }
-/*
+
 /// Situation: Calling a node with an interface that doesn't exists
 /// Expectation: The client throws an exception with a useful error message
 /// This can happen by mistake (API mixup) or when a method is optional.
@@ -2253,4 +2433,4 @@ unittest
     assertThrown!ClientException(extnode.optional());
     node.ctrl.shutdown();
     thread_joinAll();
-}*/
+}
