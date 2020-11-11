@@ -49,6 +49,8 @@ import std.algorithm;
 import std.typecons;
 import std.container : DList;
 
+import geod24.RingBuffer;
+
 ///
 @system unittest
 {
@@ -1737,6 +1739,8 @@ final public class Channel (T) : Selectable
     {
         this.max_size = max_size;
         this.lock = new Mutex;
+        if (max_size)
+            this.buffer = new RingBuffer!T(max_size);
     }
 
     /***********************************************************************
@@ -1831,7 +1835,7 @@ final public class Channel (T) : Selectable
                     && this.buffer.length < this.max_size
                     && (!caller_sel || caller_sel.tryConsume(caller_sel_id)))
         {
-            this.buffer ~= val;
+            this.buffer.insert(val);
             return true;
         }
 
@@ -1946,7 +1950,7 @@ final public class Channel (T) : Selectable
     {
         ChannelQueueEntry write_ent = this.dequeueEntry(this.writeq, caller_sel, caller_sel_id);
 
-        if (this.buffer.length > 0)
+        if (this.max_size > 0 && !this.buffer.empty())
         {
             // if dequeueEntry fails, we will try to consume caller_sel again.
             if (!caller_sel || write_ent || caller_sel.tryConsume(caller_sel_id))
@@ -1956,7 +1960,7 @@ final public class Channel (T) : Selectable
 
                 if (write_ent)
                 {
-                    this.buffer ~= *write_ent.pVal;
+                    this.buffer.insert(*write_ent.pVal);
                 }
             }
             else
@@ -2224,7 +2228,7 @@ final public class Channel (T) : Selectable
 
 private:
     /// Internal data storage
-    T[] buffer;
+    RingBuffer!T buffer;
 
     /// Closed flag
     bool closed;
