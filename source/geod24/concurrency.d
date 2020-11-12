@@ -2315,7 +2315,7 @@ final public class Channel (T) : Selectable
 
     ***********************************************************************/
 
-    private class ChannelQueueEntry : FiberScheduler.Resource
+    private static class ChannelQueueEntry : FiberScheduler.Resource
     {
         /// FiberBlocker blocking the `Fiber`
         FiberScheduler.FiberBlocker blocker;
