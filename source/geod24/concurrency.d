@@ -48,7 +48,7 @@ import std.range.primitives;
 import std.traits;
 import std.algorithm;
 import std.typecons;
-import std.container : DList;
+import std.container : DList, SList;
 import std.exception : assumeWontThrow;
 
 import geod24.RingBuffer;
@@ -870,11 +870,20 @@ public void thisScheduler (FiberScheduler value) nothrow
  */
 class FiberScheduler
 {
-    /// Default ctor
-    this () nothrow
+    /***************************************************************************
+
+        Default ctor
+
+        Params:
+            max_parked_fibers = Maximum number of parked fibers
+
+    ***************************************************************************/
+
+    this (size_t max_parked_fibers = 8) nothrow
     {
         this.sem = assumeWontThrow(new Semaphore());
         this.blocked_ex = new FiberBlockedException();
+        this.max_parked = max_parked_fibers;
     }
 
     /**
@@ -994,10 +1003,24 @@ protected:
      */
     void create (void delegate() op, bool insert_front = false) nothrow
     {
-        if (insert_front)
-            this.readyq.insertFront(new InfoFiber(op));
+        InfoFiber new_fiber;
+        if (this.parked_count > 0)
+        {
+            new_fiber = this.parked_fibers.front();
+            new_fiber.reuse(op);
+
+            this.parked_fibers.removeFront();
+            this.parked_count--;
+        }
         else
-            this.readyq.insertBack(new InfoFiber(op));
+        {
+            new_fiber = new InfoFiber(op);
+        }
+
+        if (insert_front)
+            this.readyq.insertFront(new_fiber);
+        else
+            this.readyq.insertBack(new_fiber);
     }
 
     /**
@@ -1014,6 +1037,23 @@ protected:
         this (void delegate() op, size_t sz = 512 * 1024) nothrow
         {
             super(op, sz);
+        }
+
+        /***********************************************************************
+
+            Reset the Fiber to be reused with a new delegate
+
+            Param:
+                op = Delegate
+
+        ***********************************************************************/
+
+        void reuse (void delegate() op) nothrow
+        {
+            assert(this.state == Fiber.State.TERM, "Can not reuse a non terminated Fiber");
+            this.blocker = null;
+            this.resources.clear();
+            this.reset(op);
         }
     }
 
@@ -1194,6 +1234,18 @@ private:
                 {
                     this.readyq.insert(cur_fiber);
                 }
+                // Park terminated Fiber
+                else if (this.parked_count < this.max_parked)
+                {
+                    this.parked_fibers.insertFront(cur_fiber);
+                    this.parked_count++;
+                }
+                // Destroy the terminated Fiber to immediately reclaim
+                // the stack space
+                else
+                {
+                    destroy!false(cur_fiber);
+                }
 
                 // See if there are Fibers to be woken up if we reach a timeout
                 // or the scheduler semaphore was notified
@@ -1294,6 +1346,15 @@ private:
 
     /// Cached instance of FiberBlockedException
     FiberBlockedException blocked_ex;
+
+    /// List of parked fibers to be reused
+    SList!InfoFiber parked_fibers;
+
+    /// Number of currently parked fibers
+    size_t parked_count;
+
+    /// Maximum number of parked fibers
+    immutable size_t max_parked;
 }
 
 /// Ensure argument to `start` is run first
