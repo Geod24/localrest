@@ -942,28 +942,6 @@ class FiberScheduler
             Fiber.yieldAndThrow(t);
     }
 
-    /**
-     * Returns an appropriate ThreadInfo instance.
-     *
-     * Returns a ThreadInfo instance specific to the calling Fiber if the
-     * Fiber was created by this dispatcher, otherwise it returns
-     * ThreadInfo.thisInfo.
-     */
-    @property ref ThreadInfo thisInfo() nothrow
-    {
-        auto f = cast(InfoFiber) Fiber.getThis();
-
-        if (f !is null)
-            return f.info;
-
-        auto t = cast(InfoThread)Thread.getThis();
-
-        if (t !is null)
-            return t.info;
-
-        return ThreadInfo.thisInfo;
-    }
-
     /// Resource type that will be tracked by FiberScheduler
     interface Resource
     {
@@ -1016,28 +994,17 @@ protected:
      */
     void create (void delegate() op, bool insert_front = false) nothrow
     {
-        void wrap()
-        {
-            scope (exit)
-            {
-                thisInfo.cleanup();
-            }
-            op();
-        }
-
         if (insert_front)
-            this.readyq.insertFront(new InfoFiber(&wrap));
+            this.readyq.insertFront(new InfoFiber(op));
         else
-            this.readyq.insertBack(new InfoFiber(&wrap));
+            this.readyq.insertBack(new InfoFiber(op));
     }
 
     /**
-     * Fiber which embeds a ThreadInfo
+     * Fiber which embeds neccessary info for FiberScheduler
      */
     static class InfoFiber : Fiber
     {
-        ThreadInfo info;
-
         /// Semaphore reference that this Fiber is blocked on
         FiberBlocker blocker;
 
