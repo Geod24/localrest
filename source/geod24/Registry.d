@@ -11,12 +11,13 @@ module geod24.Registry;
 
 import core.sync.mutex;
 import geod24.concurrency;
+import geod24.LocalRest;
 
 /// Ditto
 public shared struct Registry
 {
-    private Tid[string] tidByName;
-    private string[][Tid] namesByTid;
+    private BindChn[string] objectByName;
+    private string[][BindChn] namesByObject;
     private Mutex registryLock;
 
     /// Initialize this registry, creating the Mutex
@@ -26,21 +27,21 @@ public shared struct Registry
     }
 
     /**
-     * Gets the Tid associated with name.
+     * Gets the BindChn associated with name.
      *
      * Params:
      *  name = The name to locate within the registry.
      *
      * Returns:
-     *  The associated Tid or Tid.init if name is not registered.
+     *  The associated BindChn or BindChn.init if name is not registered.
      */
-    Tid locate(string name)
+    BindChn locate(string name)
     {
         synchronized (registryLock)
         {
-            if (shared(Tid)* tid = name in this.tidByName)
-                return *cast(Tid*)tid;
-            return Tid.init;
+            if (shared(BindChn)* obj = name in this.objectByName)
+                return *cast(BindChn*)obj;
+            return null;
         }
     }
 
@@ -59,16 +60,14 @@ public shared struct Registry
      *  true if the name is available and tid is not known to represent a
      *  defunct thread.
      */
-    bool register(string name, Tid tid)
+    bool register(string name, BindChn obj)
     {
         synchronized (registryLock)
         {
-            if (name in tidByName)
+            if (name in objectByName)
                 return false;
-            if (tid.mbox.isClosed)
-                return false;
-            this.namesByTid[tid] ~= name;
-            this.tidByName[name] = cast(shared)tid;
+            this.namesByObject[obj] ~= name;
+            this.objectByName[name] = cast(shared)obj;
             return true;
         }
     }
@@ -89,12 +88,12 @@ public shared struct Registry
 
         synchronized (registryLock)
         {
-            if (shared(Tid)* tid = name in this.tidByName)
+            if (shared(BindChn)* obj = name in this.objectByName)
             {
-                auto allNames = *cast(Tid*)tid in this.namesByTid;
+                auto allNames = *cast(BindChn*)obj in this.namesByObject;
                 auto pos = countUntil(*allNames, name);
                 remove!(SwapStrategy.unstable)(*allNames, pos);
-                this.tidByName.remove(name);
+                this.objectByName.remove(name);
                 return true;
             }
             return false;
