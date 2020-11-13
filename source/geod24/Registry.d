@@ -74,7 +74,7 @@ public shared struct Registry (API)
         {
             if (name in this.connections)
                 return false;
-            if (conn.data.mbox.isClosed)
+            if (conn.data.isClosed)
                 return false;
             this.names[conn] ~= name;
             this.connections[name] = cast(shared)conn;
