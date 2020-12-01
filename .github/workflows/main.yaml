@@ -1,0 +1,40 @@
+# Github action to test localrest
+#
+# Also upload the documentation to Github pages
+#
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  main:
+    name: Run
+    # Matrix configuration
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macOS-latest, windows-latest ]
+        dc: [ ldc-master, dmd-master, ldc-latest, dmd-latest, ldc-1.20.0, dmd-2.090.1 ]
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+
+    # The actual work being performed
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Prepare compiler
+        uses: dlang-community/setup-dlang@v1
+        with:
+          compiler: ${{ matrix.dc }}
+
+      - name: Test
+        shell: bash
+        run: dub test -b unittest-cov --compiler=${DC}
+
+      - uses: codecov/codecov-action@v1
+        with:
+          name: localrest-${{ matrix.os }}-${{ matrix.dc }}
+          flags: unittest
+          # false until we can re-trigger a single test in Github
+          fail_ci_if_error: false
