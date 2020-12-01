@@ -11,6 +11,7 @@ jobs:
         dc: [ dmd-latest, ldc-latest, dmd-2.085.1, ldc-1.14.0 ]
 
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
 
     steps:
     - uses: actions/checkout@v2
