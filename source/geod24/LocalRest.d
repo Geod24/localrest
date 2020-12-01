@@ -1155,9 +1155,11 @@ unittest
     }
 
     scope test = RemoteAPI!API.spawn!MockAPI();
+    scope (exit) {
+        test.ctrl.shutdown();
+        thread_joinAll();
+    }
     assert(test.pubkey() == 42);
-    test.ctrl.shutdown();
-    thread_joinAll();
 }
 
 /// Example where a shutdown() routine must be called on a node before
@@ -1192,6 +1194,7 @@ unittest
     }
 
     scope test = RemoteAPI!API.spawn!MockAPI();
+    scope (failure) test.ctrl.shutdown();
     assert(test.pubkey() == 42);
     test.ctrl.shutdown(&onDestroy);
     thread_joinAll();
@@ -1270,6 +1273,10 @@ unittest
     {
         auto node1 = factory("this does not matter", 1);
         auto node2 = factory("neither does this", 2);
+        scope (exit) {
+            node1.ctrl.shutdown();
+            node2.ctrl.shutdown();
+        }
         assert(node1.pubkey() == 42);
         assert(node1.last() == "pubkey");
         assert(node2.pubkey() == 0);
@@ -1280,8 +1287,6 @@ unittest
         node1.recv(null);
         assert(node1.last() == "recv@1");
         assert(node2.last() == "pubkey");
-        node1.ctrl.shutdown();
-        node2.ctrl.shutdown();
     }
 
     scope thread = new Thread(&testFunc);
@@ -1348,6 +1353,11 @@ unittest
     nodes[1] = RemoteAPI!API.spawn!SlaveNode(master.chn());
     nodes[2] = RemoteAPI!API.spawn!SlaveNode(master.chn());
     nodes[3] = RemoteAPI!API.spawn!SlaveNode(master.chn());
+    scope (exit) {
+        import std.algorithm;
+        nodes.each!(node => node.ctrl.shutdown());
+        thread_joinAll();
+    }
 
     foreach (n; nodes)
     {
@@ -1364,9 +1374,6 @@ unittest
     }
 
     assert(nodes[0].requests() == 7);
-    import std.algorithm;
-    nodes.each!(node => node.ctrl.shutdown());
-    thread_joinAll();
 }
 
 /// Support for circular nodes call
@@ -1406,6 +1413,11 @@ unittest
         RemoteAPI!API.spawn!Node(),
         RemoteAPI!API.spawn!Node(),
     ];
+    scope (exit) {
+        import std.algorithm;
+        nodes.each!(node => node.ctrl.shutdown());
+        thread_joinAll();
+    }
 
     foreach (idx, ref api; nodes)
         tbn[format("node%d", idx)] = api.chn();
@@ -1415,10 +1427,6 @@ unittest
 
     // 7 level of re-entrancy
     assert(210 == nodes[0].call(20, 0));
-
-    import std.algorithm;
-    nodes.each!(node => node.ctrl.shutdown());
-    thread_joinAll();
 }
 
 
@@ -1460,6 +1468,10 @@ unittest
     }
 
     auto node = RemoteAPI!API.spawn!Node();
+    scope (exit) {
+        node.ctrl.shutdown();
+        thread_joinAll();
+    }
     assert(node.getCounter() == 0);
     node.start();
     assert(node.getCounter() == 1);
@@ -1468,9 +1480,7 @@ unittest
     // It should be 19 but some machines are very slow
     // (e.g. Travis Mac testers) so be safe
     assert(node.getCounter() >= 9);
-    assert(node.getCounter() == 0);
-    node.ctrl.shutdown();
-    thread_joinAll();
+    assert(node.getCounter() < 9);
 }
 
 // Sane name insurance policy
@@ -1489,6 +1499,10 @@ unittest
     }
 
     auto node = RemoteAPI!API.spawn!Node();
+    scope (exit) {
+        node.ctrl.shutdown();
+        thread_joinAll();
+    }
     assert(node.tid == 42);
     assert(node.ctrl.chn !is null);
 
@@ -1497,8 +1511,6 @@ unittest
         public string ctrl ();
     }
     static assert(!is(typeof(RemoteAPI!DoesntWork)));
-    node.ctrl.shutdown();
-    thread_joinAll();
 }
 
 // Simulate temporary outage
@@ -1528,6 +1540,11 @@ unittest
     auto n1 = RemoteAPI!API.spawn!Node();
     n1chn = n1.chn();
     auto n2 = RemoteAPI!API.spawn!Node();
+    scope (exit) {
+        n1.ctrl.shutdown();
+        n2.ctrl.shutdown();
+        thread_joinAll();
+    }
 
     /// Make sure calls are *relatively* efficient
     auto current1 = MonoTime.currTime();
@@ -1552,10 +1569,10 @@ unittest
 
     // Now drop many messages
     n1.sleep(1.seconds, true);
-    for (size_t i = 0; i < 500; i++)
+    auto start = MonoTime.currTime;
+    while (MonoTime.currTime - start < 900.msecs)
         n2.asyncCall();
-    // Make sure we don't end up blocked forever
-    n1.sleep(0.seconds, false);
+    Thread.sleep(200.msecs);
     assert(3 == n1.call());
 
     // Debug output, uncomment if needed
@@ -1566,10 +1583,6 @@ unittest
         writeln("Sleep + non-blocking call: ", current3 - current2);
         writeln("Delta since sleep: ", current4 - current2);
     }
-
-    n1.ctrl.shutdown();
-    n2.ctrl.shutdown();
-    thread_joinAll();
 }
 
 // Filter commands
@@ -1657,6 +1670,11 @@ unittest
 
     // caller will call filtered
     auto caller = RemoteAPI!API.spawn!Node();
+    scope (exit) {
+        filtered.ctrl.shutdown();
+        caller.ctrl.shutdown();
+        thread_joinAll();
+    }
     caller.callFoo();
     assert(filtered.fooCount() == 1);
 
@@ -1709,10 +1727,6 @@ unittest
     filtered.clearFilter();
     caller.foo();
     caller.bar(1);
-
-    filtered.ctrl.shutdown();
-    caller.ctrl.shutdown();
-    thread_joinAll();
 }
 
 // request timeouts (from main thread)
@@ -1740,6 +1754,10 @@ unittest
 
     // node with no timeout
     auto node = RemoteAPI!API.spawn!Node();
+    scope (exit) {
+        node.ctrl.shutdown();
+        thread_joinAll();
+    }
     assert(node.sleepFor(80) == 42);  // no timeout
 
     // custom timeout
@@ -1776,6 +1794,7 @@ unittest
 
     // node with a configured timeout
     auto to_node = RemoteAPI!API.spawn!Node(500.msecs);
+    scope (exit) to_node.ctrl.shutdown();
 
     /// none of these should time out
     assert(to_node.sleepFor(10) == 42);
@@ -1786,10 +1805,6 @@ unittest
     assertThrown!Exception(to_node.sleepFor(2000));
     to_node.ctrl.withTimeout(3.seconds,  // wait for the node to wake up
           (scope API api) { api.ping(); });
-
-    to_node.ctrl.shutdown();
-    node.ctrl.shutdown();
-    thread_joinAll();
 }
 
 // test-case for responses to re-used requests (from main thread)
@@ -1816,11 +1831,15 @@ unittest
 
     // node with no timeout
     auto node = RemoteAPI!API.spawn!Node();
+    scope (exit) {
+        node.ctrl.shutdown();
+        thread_joinAll();
+    }
     assert(node.sleepFor(80) == 42);  // no timeout
 
     // node with a configured timeout
     auto to_node = RemoteAPI!API.spawn!Node(500.msecs);
-
+    scope (exit) to_node.ctrl.shutdown();
     /// none of these should time out
     assert(to_node.sleepFor(10) == 42);
     assert(to_node.sleepFor(20) == 42);
@@ -1830,9 +1849,6 @@ unittest
     assertThrown!Exception(to_node.sleepFor(2000));
     to_node.ctrl.withTimeout(3.seconds,  // wait for the node to wake up
       (scope API api) { assert(cast(int)api.getFloat() == 69); });
-    to_node.ctrl.shutdown();
-    node.ctrl.shutdown();
-    thread_joinAll();
 }
 
 // request timeouts (foreign node to another node)
@@ -1867,13 +1883,15 @@ unittest
         }
     }
 
-    auto node_1 = RemoteAPI!API.spawn!Node();
+    auto node_1 = RemoteAPI!API.spawn!Node(5.seconds);
     auto node_2 = RemoteAPI!API.spawn!Node();
+    scope (exit) {
+        node_1.ctrl.shutdown();
+        node_2.ctrl.shutdown();
+        thread_joinAll();
+    }
     node_chn = node_2.chn();
     node_1.check();
-    node_1.ctrl.shutdown();
-    node_2.ctrl.shutdown();
-    thread_joinAll();
 }
 
 // test-case for zombie responses
@@ -1910,13 +1928,15 @@ unittest
         }
     }
 
-    auto node_1 = RemoteAPI!API.spawn!Node();
+    auto node_1 = RemoteAPI!API.spawn!Node(5.seconds);
     auto node_2 = RemoteAPI!API.spawn!Node();
+    scope (exit) {
+        node_1.ctrl.shutdown();
+        node_2.ctrl.shutdown();
+        thread_joinAll();
+    }
     node_chn = node_2.chn();
     node_1.check();
-    node_1.ctrl.shutdown();
-    node_2.ctrl.shutdown();
-    thread_joinAll();
 }
 
 // request timeouts with dropped messages
@@ -1948,13 +1968,15 @@ unittest
         }
     }
 
-    auto node_1 = RemoteAPI!API.spawn!Node();
+    auto node_1 = RemoteAPI!API.spawn!Node(5.seconds);
     auto node_2 = RemoteAPI!API.spawn!Node();
+    scope (exit) {
+        node_1.ctrl.shutdown();
+        node_2.ctrl.shutdown();
+        thread_joinAll();
+    }
     node_chn = node_2.chn();
     node_1.check();
-    node_1.ctrl.shutdown();
-    node_2.ctrl.shutdown();
-    thread_joinAll();
 }
 
 
@@ -1991,13 +2013,15 @@ unittest
 
     auto node_1 = RemoteAPI!API.spawn!Node(500.msecs);
     auto node_2 = RemoteAPI!API.spawn!Node();
+    scope (exit) {
+        node_1.ctrl.shutdown();
+        node_2.ctrl.shutdown();
+        thread_joinAll();
+    }
     node_chn = node_2.chn();
     node_1.check();
     node_1.ctrl.sleep(300.msecs);
     assert(node_1.ping() == 42);
-    node_1.ctrl.shutdown();
-    node_2.ctrl.shutdown();
-    thread_joinAll();
 }
 
 // Test explicit shutdown
@@ -2019,6 +2043,7 @@ unittest
     }
 
     auto node = RemoteAPI!API.spawn!Node(1.seconds);
+    scope (failure) node.ctrl.shutdown();
     assert(node.myping(42) == 42);
     node.ctrl.shutdown();
     thread_joinAll();
@@ -2060,18 +2085,23 @@ unittest
             // We need to return immediately so that the main thread can continue testing
             runTask(() {
                 node.ctrl.sleep(500.msecs);
-                node.segfault();
+                // node may have shutdown at this point
+                try {
+                    node.segfault();
+                } catch (Exception e) {}
             });
         }
     }
 
-    auto node_1 = RemoteAPI!API.spawn!Node();
+    auto node_1 = RemoteAPI!API.spawn!Node(5.seconds);
     auto node_2 = RemoteAPI!API.spawn!Node();
+    scope (exit) {
+        node_2.ctrl.shutdown();  // shut it down before wake-up, segfault() command will be ignored
+        node_1.ctrl.shutdown();
+        thread_joinAll();
+    }
     node_chn = node_2.chn();
     node_1.check();
-    node_2.ctrl.shutdown();  // shut it down before wake-up, segfault() command will be ignored
-    node_1.ctrl.shutdown();
-    thread_joinAll();
 }
 
 /// Example of a custom (de)serialization policy
@@ -2123,12 +2153,14 @@ unittest
     }
 
     scope test = RemoteAPI!(API, Serialize).spawn!MockAPI();
+    scope (exit) {
+        test.ctrl.shutdown();
+        thread_joinAll();
+    }
     assert(test.pubkey() == 42);
     assert(test.getValue("Hello world") == ValueType(11, 2, 3));
     ubyte[64] val = 42;
     assert(test.getHash(val) == val[0 .. 32]);
-    test.ctrl.shutdown();
-    thread_joinAll();
 }
 
 /// Test node2 responding to a dead node1
@@ -2184,6 +2216,11 @@ unittest
     // Long timeout to ensure we don't spuriously pass
     auto node1 = RemoteAPI!API.spawn!Node(500.msecs);
     auto node2 = RemoteAPI!API.spawn!Node();
+    scope (exit) {
+        node1.ctrl.shutdown();
+        node2.ctrl.shutdown();
+        thread_joinAll();
+    }
     node1Chn = node1.ctrl.chn();
     node2Chn = node2.ctrl.chn();
 
@@ -2196,9 +2233,6 @@ unittest
         assert(0, "This should have timed out");
     }
     catch (Exception e) {}
-
-    node2.ctrl.shutdown();
-    thread_joinAll();
 }
 
 /// Test Timer
@@ -2250,6 +2284,10 @@ unittest
     }
 
     auto node = RemoteAPI!API.spawn!Node();
+    scope (exit) {
+        node.ctrl.shutdown();
+        thread_joinAll();
+    }
     assert(node.getCounter() == 0);
     node.startTimer(true);
     core.thread.Thread.sleep(1.seconds);
@@ -2261,8 +2299,6 @@ unittest
     node.stopTimer();
     core.thread.Thread.sleep(500.msecs);
     assert(node.getCounter() == 0);
-    node.ctrl.shutdown();
-    thread_joinAll();
 }
 
 /// Test restarting a node
@@ -2295,13 +2331,15 @@ unittest
     }
 
     auto node = RemoteAPI!API.spawn!Node();
+    scope (exit) {
+        node.ctrl.shutdown();
+        thread_joinAll();
+    }
     assert(node.getCount == [1, 0]);
     node.ctrl.restart();
     assert(node.getCount == [2, 1]);
     node.ctrl.restart();
     assert(node.getCount == [3, 2]);
-    node.ctrl.shutdown();
-    thread_joinAll();
 }
 
 /// Test restarting a node that has responses waiting for it
@@ -2337,6 +2375,11 @@ unittest
 
     auto node1 = RemoteAPI!API.spawn!Node(500.msecs);
     auto node2 = RemoteAPI!API.spawn!Node();
+    scope (exit) {
+        node1.ctrl.shutdown();
+        node2.ctrl.shutdown();
+        thread_joinAll();
+    }
     node2Chn = node2.ctrl.chn();
     node2.ctrl.sleep(2.seconds, false);
 
@@ -2359,10 +2402,6 @@ unittest
         count++;
         Thread.sleep(10.msecs);
     }
-
-    node1.ctrl.shutdown();
-    node2.ctrl.shutdown();
-    thread_joinAll();
 }
 
 unittest
@@ -2398,10 +2437,12 @@ unittest
     }
 
     auto node = RemoteAPI!API.spawn!Node();
+    scope (exit) {
+        node.ctrl.shutdown();
+        thread_joinAll();
+    }
     node.start();
     assert(node.getValue() == 2);
-    node.ctrl.shutdown();
-    thread_joinAll();
 }
 
 /// Situation: Calling a node with an interface that doesn't exists
@@ -2427,9 +2468,11 @@ unittest
     }
 
     auto node = RemoteAPI!BaseAPI.spawn!BaseNode();
+    scope (exit) {
+        node.ctrl.shutdown();
+        thread_joinAll();
+    }
     scope extnode = new RemoteAPI!APIExtended(node.ctrl.chn());
     assert(extnode.required() == 42);
     assertThrown!ClientException(extnode.optional());
-    node.ctrl.shutdown();
-    thread_joinAll();
 }

@@ -2922,7 +2922,7 @@ public:
         FiberScheduler scheduler = new FiberScheduler;
         scheduler.start(
             () {
-                Thread.sleep(100.msecs);
+                Thread.sleep(1000.msecs);
                 assert(chn1.write(42));
             }
         );
@@ -2934,7 +2934,7 @@ public:
         scheduler.start(
             () {
                 int read_val;
-                Thread.sleep(200.msecs);
+                Thread.sleep(2000.msecs);
                 assert(chn1.read(read_val));
                 assert(read_val == 43);
             }
@@ -2946,16 +2946,16 @@ public:
         () {
             int read_val;
 
-            assert(!chn1.read(read_val, 10.msecs));
-            assert(MonoTime.currTime - start >= 10.msecs);
-            assert(chn1.read(read_val, 200.msecs));
+            assert(!chn1.read(read_val, 100.msecs));
             assert(MonoTime.currTime - start >= 100.msecs);
+            assert(chn1.read(read_val, 2000.msecs));
+            assert(MonoTime.currTime - start >= 1000.msecs);
             assert(read_val == 42);
 
-            assert(!chn1.write(read_val + 1, 10.msecs));
-            assert(MonoTime.currTime - start >= 110.msecs);
-            assert(chn1.write(read_val + 1, 200.msecs));
-            assert(MonoTime.currTime - start >= 200.msecs);
+            assert(!chn1.write(read_val + 1, 100.msecs));
+            assert(MonoTime.currTime - start >= 1100.msecs);
+            assert(chn1.write(read_val + 1, 2000.msecs));
+            assert(MonoTime.currTime - start >= 2000.msecs);
         }
     );
 
