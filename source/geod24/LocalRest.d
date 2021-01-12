@@ -191,6 +191,30 @@ private struct Response
     SerializedData data;
 }
 
+/// Tag stored inside of a `Variant`
+/// The definition is outside the struct to avoid issues with templating
+private enum VariantType : ubyte
+{
+    command,
+    response,
+}
+
+/// Simple tagged union used for untyped message passing
+private struct Variant
+{
+    this (Command msg)  { this.cmd = msg; this.tag = VariantType.command; }
+    this (Response msg) { this.res = msg; this.tag = VariantType.response; }
+
+    union
+    {
+        Command cmd;
+        Response res;
+    }
+
+    VariantType tag;
+}
+
+
 /// Thrown when the sent request is faulty (e.g. 4xx HTTP error types)
 public class ClientException : Exception
 {
@@ -551,22 +575,6 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
             }
         }
 
-        // very simple & limited variant, to keep it performant.
-        // should be replaced by a real Variant later
-        static struct Variant
-        {
-            this (Response res) { this.res = res; this.tag = 0; }
-            this (Command cmd) { this.cmd = cmd; this.tag = 1; }
-
-            union
-            {
-                Response res;
-                Command cmd;
-            }
-
-            ubyte tag;
-        }
-
         // used for controling filtering / sleep
         static struct Control
         {
@@ -649,7 +657,9 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                     // now handle any leftover messages after any sleep() call
                     if (!control.isSleeping())
                     {
-                        await_msgs.each!(msg => msg.tag == 0 ? handle(msg.res) : handle(msg.cmd));
+                        await_msgs.each!(msg =>
+                                         msg.tag == VariantType.command
+                                         ? handle(msg.cmd) : handle(msg.res));
                         await_msgs.length = 0;
                         assumeSafeAppend(await_msgs);
                     }
