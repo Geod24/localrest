@@ -13,7 +13,7 @@ import core.sync.mutex;
 import geod24.concurrency;
 
 /// Ditto
-public shared struct Registry
+public shared struct Registry (API)
 {
     private Tid[string] tidByName;
     private string[][Tid] namesByTid;

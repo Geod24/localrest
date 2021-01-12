@@ -1094,9 +1094,6 @@ unittest
     static import geod24.concurrency;
     import geod24.Registry;
 
-    __gshared Registry registry;
-    registry.initialize();
-
     static interface API
     {
         @safe:
@@ -1107,6 +1104,9 @@ unittest
 
         public string last ();
     }
+
+    __gshared Registry!API registry;
+    registry.initialize();
 
     static class Node : API
     {
