@@ -409,6 +409,25 @@ public final class Timer
 
 /*******************************************************************************
 
+    A reference to the "listening" connection of a remote thread
+
+    When a remote thread starts, it initially listens for new connection
+    (similarly to `bind` in C). When a new connection is started, it creates
+    a separate channel for communication (similar to `accept` in C).
+    This newly-created channel is what `RemoteAPI` wraps.
+    The channel / link / connection to the original listener, which is the only
+    one able to establish a connection, is what this data structure wraps.
+
+*******************************************************************************/
+
+public struct Listener (API)
+{
+    /// Internal data, do not use
+    package C.Tid data;
+}
+
+/*******************************************************************************
+
     A reference to an alread-instantiated node
 
     This class serves the same purpose as a `RestInterfaceClient`:
@@ -465,7 +484,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         string file = __FILE__, int line = __LINE__)
     {
         auto childTid = C.spawn(&spawned!(Impl), file, line, args);
-        return new RemoteAPI(childTid, timeout);
+        return new RemoteAPI(Listener!API(childTid), timeout);
     }
 
     /// Helper template to get the constructor's parameters
@@ -708,16 +727,16 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         In order to instantiate a node, see the static `spawn` function.
 
         Params:
-          tid = `geod24.concurrency.Tid` of the node.
-                This can usually be obtained by `geod24.concurrency.locate`.
+          listener = The listener used to connect to the node (most frequently
+                     obtained by calling `geod24.concurrency.locate`)
           timeout = any timeout to use
 
     ***************************************************************************/
 
-    public this (C.Tid tid, Duration timeout = Duration.init)
+    public this (Listener!API listener, Duration timeout = Duration.init)
         @safe @nogc pure nothrow
     {
-        this.childTid = tid;
+        this.childTid = listener.data;
         this.timeout = timeout;
     }
 
@@ -739,17 +758,19 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
     {
         /***********************************************************************
 
-            Returns the `Tid` this `RemoteAPI` wraps
+            Returns the listener this `RemoteAPI` used
 
-            This can be useful for calling `geod24.concurrency.register` or similar.
-            Note that the `Tid` should not be used directly, as our event loop,
-            would error out on an unknown message.
+            The connection represents the link to the "bind address" of the
+            remote thread. It can be used with `geod24.concurrency.register`
+            to allow other piece of code to establish a connection.
+            It *cannot* be used to send commands directly to the remote thread.
+            Instead, a new `RemoteAPI` should be instantiated from it.
 
         ***********************************************************************/
 
-        public C.Tid tid () @nogc pure nothrow
+        public Listener!API listener () @nogc pure nothrow
         {
-            return this.childTid;
+            return Listener!API(this.childTid);
         }
 
         /***********************************************************************
@@ -921,7 +942,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
         public void withTimeout (Dg) (Duration timeout, scope Dg dg)
         {
-            scope api = new RemoteAPI(this.childTid, timeout);
+            scope api = new RemoteAPI(this.ctrl.listener(), timeout);
             static assert(is(typeof({ dg(api); })),
                           "Provided argument of type `" ~ Dg.stringof ~
                           "` is not callable with argument type `scope " ~
@@ -1130,19 +1151,19 @@ unittest
     static RemoteAPI!API factory (string type, ulong hash)
     {
         const name = hash.to!string;
-        auto tid = registry.locate(name);
-        if (tid != tid.init)
-            return new RemoteAPI!API(tid);
+        auto listener = registry.locate(name);
+        if (listener !is Listener!API.init)
+            return new RemoteAPI!API(listener);
 
         switch (type)
         {
         case "normal":
             auto ret =  RemoteAPI!API.spawn!Node(false);
-            registry.register(name, ret.tid());
+            registry.register(name, ret.ctrl.listener());
             return ret;
         case "byzantine":
             auto ret =  RemoteAPI!API.spawn!Node(true);
-            registry.register(name, ret.tid());
+            registry.register(name, ret.ctrl.listener());
             return ret;
         default:
             assert(0, type);
@@ -1208,9 +1229,9 @@ unittest
     static class SlaveNode : API
     {
         @safe:
-        this(Tid masterTid)
+        this(Listener!API masterConn)
         {
-            this.master = new RemoteAPI!API(masterTid);
+            this.master = new RemoteAPI!API(masterConn);
         }
 
         public override @property ulong requests()
@@ -1231,9 +1252,9 @@ unittest
     RemoteAPI!API[4] nodes;
     auto master = RemoteAPI!API.spawn!MasterNode();
     nodes[0] = master;
-    nodes[1] = RemoteAPI!API.spawn!SlaveNode(master.tid());
-    nodes[2] = RemoteAPI!API.spawn!SlaveNode(master.tid());
-    nodes[3] = RemoteAPI!API.spawn!SlaveNode(master.tid());
+    nodes[1] = RemoteAPI!API.spawn!SlaveNode(master.ctrl.listener());
+    nodes[2] = RemoteAPI!API.spawn!SlaveNode(master.ctrl.listener());
+    nodes[3] = RemoteAPI!API.spawn!SlaveNode(master.ctrl.listener());
 
     foreach (n; nodes)
     {
@@ -1260,14 +1281,14 @@ unittest
 {
     static import geod24.concurrency;
 
-    __gshared C.Tid[string] tbn;
-
     static interface API
     {
         @safe:
         public ulong call (ulong count, ulong val);
         public void setNext (string name);
     }
+
+    __gshared Listener!API[string] tbn;
 
     static class Node : API
     {
@@ -1294,7 +1315,7 @@ unittest
     ];
 
     foreach (idx, ref api; nodes)
-        tbn[format("node%d", idx)] = api.tid();
+        tbn[format("node%d", idx)] = api.ctrl.listener();
     nodes[0].setNext("node1");
     nodes[1].setNext("node2");
     nodes[2].setNext("node0");
@@ -1376,7 +1397,7 @@ unittest
 
     auto node = RemoteAPI!API.spawn!Node();
     assert(node.tid == 42);
-    assert(node.ctrl.tid != Tid.init);
+    assert(node.ctrl.listener() !is Listener!API.init);
 
     static interface DoesntWork
     {
@@ -1390,19 +1411,20 @@ unittest
 // Simulate temporary outage
 unittest
 {
-    __gshared C.Tid n1tid;
-
     static interface API
     {
         public ulong call ();
         public void asyncCall ();
     }
+
+    __gshared Listener!API n1conn;
+
     static class Node : API
     {
         public this()
         {
-            if (n1tid != C.Tid.init)
-                this.remote = new RemoteAPI!API(n1tid);
+            if (n1conn !is Listener!API.init)
+                this.remote = new RemoteAPI!API(n1conn);
         }
 
         public override ulong call () { return ++this.count; }
@@ -1412,7 +1434,7 @@ unittest
     }
 
     auto n1 = RemoteAPI!API.spawn!Node();
-    n1tid = n1.tid();
+    n1conn = n1.ctrl.listener();
     auto n2 = RemoteAPI!API.spawn!Node();
 
     /// Make sure calls are *relatively* efficient
@@ -1461,8 +1483,6 @@ unittest
 // Filter commands
 unittest
 {
-    __gshared C.Tid node_tid;
-
     static interface API
     {
         size_t fooCount();
@@ -1476,6 +1496,8 @@ unittest
         void callFoo (int);
     }
 
+    __gshared Listener!API node_listener;
+
     static class Node : API
     {
         size_t foo_count;
@@ -1485,7 +1507,7 @@ unittest
 
         public this()
         {
-            this.remote = new RemoteAPI!API(node_tid);
+            this.remote = new RemoteAPI!API(node_listener);
         }
 
         override size_t fooCount() { return this.foo_count; }
@@ -1536,7 +1558,7 @@ unittest
     }
 
     auto filtered = RemoteAPI!API.spawn!Node();
-    node_tid = filtered.tid();
+    node_listener = filtered.ctrl.listener();
 
     // caller will call filtered
     auto caller = RemoteAPI!API.spawn!Node();
@@ -1724,13 +1746,13 @@ unittest
     static import geod24.concurrency;
     import std.exception;
 
-    __gshared C.Tid node_tid;
-
     static interface API
     {
         void check ();
         int ping ();
     }
+
+    __gshared Listener!API node_listener;
 
     static class Node : API
     {
@@ -1738,7 +1760,7 @@ unittest
 
         override void check ()
         {
-            auto node = new RemoteAPI!API(node_tid, 500.msecs);
+            auto node = new RemoteAPI!API(node_listener, 500.msecs);
 
             // no time-out
             node.ctrl.sleep(10.msecs);
@@ -1752,7 +1774,7 @@ unittest
 
     auto node_1 = RemoteAPI!API.spawn!Node();
     auto node_2 = RemoteAPI!API.spawn!Node();
-    node_tid = node_2.tid;
+    node_listener = node_2.ctrl.listener();
     node_1.check();
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
@@ -1765,14 +1787,14 @@ unittest
     static import geod24.concurrency;
     import std.exception;
 
-    __gshared C.Tid node_tid;
-
     static interface API
     {
         void check ();
         int get42 ();
         int get69 ();
     }
+
+    __gshared Listener!API node_listener;
 
     static class Node : API
     {
@@ -1781,7 +1803,7 @@ unittest
 
         override void check ()
         {
-            auto node = new RemoteAPI!API(node_tid, 500.msecs);
+            auto node = new RemoteAPI!API(node_listener, 500.msecs);
 
             // time-out
             node.ctrl.sleep(2000.msecs);
@@ -1795,7 +1817,7 @@ unittest
 
     auto node_1 = RemoteAPI!API.spawn!Node();
     auto node_2 = RemoteAPI!API.spawn!Node();
-    node_tid = node_2.tid;
+    node_listener = node_2.ctrl.listener();
     node_1.check();
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
@@ -1808,13 +1830,13 @@ unittest
     static import geod24.concurrency;
     import std.exception;
 
-    __gshared C.Tid node_tid;
-
     static interface API
     {
         void check ();
         int ping ();
     }
+
+    __gshared Listener!API node_listener;
 
     static class Node : API
     {
@@ -1822,7 +1844,7 @@ unittest
 
         override void check ()
         {
-            auto node = new RemoteAPI!API(node_tid, 420.msecs);
+            auto node = new RemoteAPI!API(node_listener, 420.msecs);
 
             // Requests are dropped, so it times out
             assert(node.ping() == 42);
@@ -1833,7 +1855,7 @@ unittest
 
     auto node_1 = RemoteAPI!API.spawn!Node();
     auto node_2 = RemoteAPI!API.spawn!Node();
-    node_tid = node_2.tid;
+    node_listener = node_2.ctrl.listener();
     node_1.check();
     node_1.ctrl.shutdown();
     node_2.ctrl.shutdown();
@@ -1846,13 +1868,13 @@ unittest
     static import geod24.concurrency;
     import std.exception;
 
-    __gshared C.Tid node_tid;
-
     static interface API
     {
         void check ();
         int ping ();
     }
+
+    __gshared Listener!API node_listener;
 
     static class Node : API
     {
@@ -1860,7 +1882,7 @@ unittest
 
         override void check ()
         {
-            auto node = new RemoteAPI!API(node_tid, 5000.msecs);
+            auto node = new RemoteAPI!API(node_listener, 5000.msecs);
             assert(node.ping() == 42);
             // We need to return immediately so that the main thread
             // puts us to sleep
@@ -1873,7 +1895,7 @@ unittest
 
     auto node_1 = RemoteAPI!API.spawn!Node(500.msecs);
     auto node_2 = RemoteAPI!API.spawn!Node();
-    node_tid = node_2.tid;
+    node_listener = node_2.ctrl.listener();
     node_1.check();
     node_1.ctrl.sleep(300.msecs);
     assert(node_1.ping() == 42);
@@ -1920,13 +1942,14 @@ unittest
 {
     import core.thread : thread_joinAll;
     static import geod24.concurrency;
-    __gshared C.Tid node_tid;
 
     static interface API
     {
         void segfault ();
         void check ();
     }
+
+    __gshared Listener!API node_listener;
 
     static class Node : API
     {
@@ -1937,7 +1960,7 @@ unittest
 
         override void check ()
         {
-            auto node = new RemoteAPI!API(node_tid);
+            auto node = new RemoteAPI!API(node_listener);
 
             // We need to return immediately so that the main thread can continue testing
             runTask(() {
@@ -1949,7 +1972,7 @@ unittest
 
     auto node_1 = RemoteAPI!API.spawn!Node();
     auto node_2 = RemoteAPI!API.spawn!Node();
-    node_tid = node_2.tid;
+    node_listener = node_2.ctrl.listener();
     node_1.check();
     node_2.ctrl.shutdown();  // shut it down before wake-up, segfault() command will be ignored
     node_1.ctrl.shutdown();
@@ -2027,8 +2050,8 @@ unittest
         public void call2 ();
     }
 
-    __gshared C.Tid node1Addr;
-    __gshared C.Tid node2Addr;
+    __gshared Listener!API node1Addr;
+    __gshared Listener!API node2Addr;
 
     static class Node : API
     {
@@ -2051,7 +2074,7 @@ unittest
             scope node1 = new RemoteAPI!API(node1Addr);
             node1.call2();
             // Make really sure Node 1 is dead
-            while (!node1Addr.mbox.isClosed())
+            while (!node1Addr.data.mbox.isClosed())
                 sleep(100.msecs);
         }
 
@@ -2066,8 +2089,8 @@ unittest
     // Long timeout to ensure we don't spuriously pass
     auto node1 = RemoteAPI!API.spawn!Node(500.msecs);
     auto node2 = RemoteAPI!API.spawn!Node();
-    node1Addr = node1.ctrl.tid();
-    node2Addr = node2.ctrl.tid();
+    node1Addr = node1.ctrl.listener();
+    node2Addr = node2.ctrl.listener();
 
     // This will timeout (because the node will be gone)
     // However if something is wrong, either `joinall` will never return,
@@ -2197,7 +2220,7 @@ unittest
         public void call1 ();
     }
 
-    __gshared C.Tid node2Addr;
+    __gshared Listener!API node2Addr;
     static shared bool done;
 
     static class Node : API
@@ -2219,7 +2242,7 @@ unittest
 
     auto node1 = RemoteAPI!API.spawn!Node(500.msecs);
     auto node2 = RemoteAPI!API.spawn!Node();
-    node2Addr = node2.ctrl.tid();
+    node2Addr = node2.ctrl.listener();
     node2.ctrl.sleep(2.seconds, false);
 
     try
@@ -2309,7 +2332,11 @@ unittest
     }
 
     auto node = RemoteAPI!BaseAPI.spawn!BaseNode();
-    scope extnode = new RemoteAPI!APIExtended(node.ctrl.tid());
+    // Note: Now that the `Listener` is typed, this kind of error is harder
+    // to make. However, it might still happen in the wild
+    // (e.g. true client/server interfacing where to sources get out of date)
+    scope extnode = new RemoteAPI!APIExtended(
+        Listener!APIExtended(node.ctrl.listener().data));
     assert(extnode.required() == 42);
     assertThrown!ClientException(extnode.optional());
     node.ctrl.shutdown();

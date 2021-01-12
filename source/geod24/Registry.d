@@ -15,19 +15,16 @@ module geod24.Registry;
 
 import core.sync.mutex;
 import geod24.concurrency;
+import geod24.LocalRest;
 
 /// Ditto
 public shared struct Registry (API)
 {
-    /// Type of object passed between a client and a server when establishing
-    /// a new connection.
-    private alias BindChan = Tid;
-
     /// Map from a name to a connection.
     /// Multiple names may point to the same connection.
-    private BindChan[string] connections;
+    private Listener!API[string] connections;
     /// Gives all the names associated with a specific connection.
-    private string[][BindChan] names;
+    private string[][Listener!API] names;
     private Mutex registryLock;
 
     /// Initialize this registry, creating the Mutex
@@ -46,13 +43,13 @@ public shared struct Registry (API)
      *   The associated binding channel or an invalid state
      *   (such as its `init` value) if `name` is not registered.
      */
-    public BindChan locate (string name)
+    public Listener!API locate (string name)
     {
         synchronized (registryLock)
         {
-            if (shared(BindChan)* c = name in this.connections)
-                return *cast(BindChan*)c;
-            return BindChan.init;
+            if (shared(Listener!API)* c = name in this.connections)
+                return *cast(Listener!API*)c;
+            return Listener!API.init;
         }
     }
 
@@ -71,13 +68,13 @@ public shared struct Registry (API)
      *  `true` if the name is available and `conn` is not known to represent a
      *  defunct thread.
      */
-    public bool register (string name, BindChan conn)
+    public bool register (string name, Listener!API conn)
     {
         synchronized (registryLock)
         {
             if (name in this.connections)
                 return false;
-            if (conn.mbox.isClosed)
+            if (conn.data.mbox.isClosed)
                 return false;
             this.names[conn] ~= name;
             this.connections[name] = cast(shared)conn;
@@ -101,9 +98,9 @@ public shared struct Registry (API)
 
         synchronized (registryLock)
         {
-            if (shared(BindChan)* tid = name in this.connections)
+            if (shared(Listener!API)* tid = name in this.connections)
             {
-                auto allNames = *cast(BindChan*)tid in this.names;
+                auto allNames = *cast(Listener!API*)tid in this.names;
                 auto pos = countUntil(*allNames, name);
                 remove!(SwapStrategy.unstable)(*allNames, pos);
                 this.connections.remove(name);
