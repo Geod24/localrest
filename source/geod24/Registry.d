@@ -2,8 +2,12 @@
 
     Registry implementation for multi-threaded access
 
-    This registry allows to look up a `Tid` based on a `string`.
-    It is extracted from the `std.concurrency` module to make it reusable
+    This registry allows to look up a connection based on a `string`.
+    Conceptually, it can be seen as an equivalent to a DNS server,
+    as it turns symbolic names into "concrete" addresses (pointers).
+
+    It was originally part of the `std.concurrency` module,
+    but was extracted to make it reusable.
 
 *******************************************************************************/
 
@@ -15,66 +19,74 @@ import geod24.concurrency;
 /// Ditto
 public shared struct Registry (API)
 {
-    private Tid[string] tidByName;
-    private string[][Tid] namesByTid;
+    /// Type of object passed between a client and a server when establishing
+    /// a new connection.
+    private alias BindChan = Tid;
+
+    /// Map from a name to a connection.
+    /// Multiple names may point to the same connection.
+    private BindChan[string] connections;
+    /// Gives all the names associated with a specific connection.
+    private string[][BindChan] names;
     private Mutex registryLock;
 
     /// Initialize this registry, creating the Mutex
-    public void initialize() @safe nothrow
+    public void initialize () @safe nothrow
     {
         this.registryLock = new shared Mutex;
     }
 
     /**
-     * Gets the Tid associated with name.
+     * Gets the binding channel associated with `name`.
      *
      * Params:
-     *  name = The name to locate within the registry.
+     *   name = The name to locate within the registry.
      *
      * Returns:
-     *  The associated Tid or Tid.init if name is not registered.
+     *   The associated binding channel or an invalid state
+     *   (such as its `init` value) if `name` is not registered.
      */
-    Tid locate(string name)
+    public BindChan locate (string name)
     {
         synchronized (registryLock)
         {
-            if (shared(Tid)* tid = name in this.tidByName)
-                return *cast(Tid*)tid;
-            return Tid.init;
+            if (shared(BindChan)* c = name in this.connections)
+                return *cast(BindChan*)c;
+            return BindChan.init;
         }
     }
 
     /**
-     * Associates name with tid.
+     * Register a new name for a connection.
      *
-     * Associates name with tid in a process-local map.  When the thread
-     * represented by tid terminates, any names associated with it will be
+     * Associates `name` with `conn` in a process-local map. When the thread
+     * represented by `conn` terminates, any names associated with it will be
      * automatically unregistered.
      *
      * Params:
-     *  name = The name to associate with tid.
-     *  tid  = The tid register by name.
+     *   name = The name to associate with `conn`.
+     *   conn = The connection to register.
      *
      * Returns:
-     *  true if the name is available and tid is not known to represent a
+     *  `true` if the name is available and `conn` is not known to represent a
      *  defunct thread.
      */
-    bool register(string name, Tid tid)
+    public bool register (string name, BindChan conn)
     {
         synchronized (registryLock)
         {
-            if (name in tidByName)
+            if (name in this.connections)
                 return false;
-            if (tid.mbox.isClosed)
+            if (conn.mbox.isClosed)
                 return false;
-            this.namesByTid[tid] ~= name;
-            this.tidByName[name] = cast(shared)tid;
+            this.names[conn] ~= name;
+            this.connections[name] = cast(shared)conn;
             return true;
         }
     }
 
     /**
-     * Removes the registered name associated with a tid.
+     * Removes the registered name associated with a connection.
      *
      * Params:
      *  name = The name to unregister.
@@ -82,19 +94,19 @@ public shared struct Registry (API)
      * Returns:
      *  true if the name is registered, false if not.
      */
-    bool unregister(string name)
+    public bool unregister (string name)
     {
         import std.algorithm.mutation : remove, SwapStrategy;
         import std.algorithm.searching : countUntil;
 
         synchronized (registryLock)
         {
-            if (shared(Tid)* tid = name in this.tidByName)
+            if (shared(BindChan)* tid = name in this.connections)
             {
-                auto allNames = *cast(Tid*)tid in this.namesByTid;
+                auto allNames = *cast(BindChan*)tid in this.names;
                 auto pos = countUntil(*allNames, name);
                 remove!(SwapStrategy.unstable)(*allNames, pos);
-                this.tidByName.remove(name);
+                this.connections.remove(name);
                 return true;
             }
             return false;
