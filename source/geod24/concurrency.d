@@ -2669,16 +2669,19 @@ public:
 
 @system unittest
 {
+    import core.sync.semaphore;
     FiberScheduler scheduler = new FiberScheduler;
     auto chn1 = new Channel!int();
 
     auto start = MonoTime.currTime;
+    Semaphore writer_sem = new Semaphore();
+    Semaphore reader_sem = new Semaphore();
 
     auto t1 = new Thread({
         FiberScheduler scheduler = new FiberScheduler;
         scheduler.start(
             () {
-                Thread.sleep(1000.msecs);
+                writer_sem.wait();
                 assert(chn1.write(42));
             }
         );
@@ -2690,7 +2693,7 @@ public:
         scheduler.start(
             () {
                 int read_val;
-                Thread.sleep(2000.msecs);
+                reader_sem.wait();
                 assert(chn1.read(read_val));
                 assert(read_val == 43);
             }
@@ -2702,20 +2705,26 @@ public:
         () {
             int read_val;
 
-            scope (failure) chn1.close();
+            scope (failure) {
+                reader_sem.notify();
+                writer_sem.notify();
+                chn1.close();
+            }
 
-            assert(!chn1.read(read_val, 10.msecs));
-            assert(MonoTime.currTime - start >= 10.msecs);
-            assert(chn1.read(read_val, 1500.msecs));
+            assert(!chn1.read(read_val, 1000.msecs));
             assert(MonoTime.currTime - start >= 1000.msecs);
+
+            writer_sem.notify();
+            assert(chn1.read(read_val, 1000.msecs));
             assert(read_val == 42);
 
             start = MonoTime.currTime;
 
-            assert(!chn1.write(read_val + 1, 10.msecs));
-            assert(MonoTime.currTime - start >= 10.msecs);
+            assert(!chn1.write(read_val + 1, 1000.msecs));
+            assert(MonoTime.currTime - start >= 1000.msecs);
+
+            reader_sem.notify();
             assert(chn1.write(read_val + 1, 1000.msecs));
-            assert(MonoTime.currTime - start >= 510.msecs);
         }
     );
 
