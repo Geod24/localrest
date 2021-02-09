@@ -1509,8 +1509,6 @@ unittest
 // Sane name insurance policy
 unittest
 {
-    import geod24.concurrency : Tid;
-
     static interface API
     {
         public ulong tid ();
