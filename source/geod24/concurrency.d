@@ -2008,7 +2008,7 @@ final public class Channel (T) : Selectable
 
         bool success = tryWrite(val);
 
-        if (!success && !this.closed)
+        if (!success && !this.isClosed())
         {
             ChannelQueueEntry q_ent = this.enqueueEntry(this.writeq, &val);
             thisScheduler().addResource(q_ent);
@@ -2044,7 +2044,7 @@ final public class Channel (T) : Selectable
 
     private bool tryWrite () (auto ref T val, SelectState caller_sel = null, int caller_sel_id = 0) nothrow
     {
-        if (this.closed)
+        if (this.isClosed())
         {
             if (caller_sel)
                 caller_sel.tryConsume(caller_sel_id, false);
@@ -2094,7 +2094,7 @@ final public class Channel (T) : Selectable
         if (!sel_state.isConsumed())
             this.enqueueEntry(this.writeq, val, sel_state, sel_id);
 
-        if (success || this.closed || sel_state.id == -1)
+        if (success || this.isClosed() || sel_state.id == -1)
         {
             this.lock.unlock_nothrow();
             sel_state.blocker.notify();
@@ -2142,7 +2142,7 @@ final public class Channel (T) : Selectable
 
         bool success = tryRead(output);
 
-        if (!success && !this.closed)
+        if (!success && !this.isClosed())
         {
             ChannelQueueEntry q_ent = this.enqueueEntry(this.readq, &output);
             thisScheduler().addResource(q_ent);
@@ -2206,7 +2206,7 @@ final public class Channel (T) : Selectable
         }
         else
         {
-            if (this.closed && caller_sel)
+            if (this.isClosed() && caller_sel)
                 caller_sel.tryConsume(caller_sel_id, false);
             return false;
         }
@@ -2241,7 +2241,7 @@ final public class Channel (T) : Selectable
         if (!sel_state.isConsumed())
             this.enqueueEntry(this.readq, val, sel_state, sel_id);
 
-        if (success || this.closed || sel_state.id == -1)
+        if (success || this.isClosed() || sel_state.id == -1)
         {
             this.lock.unlock_nothrow();
             sel_state.blocker.notify();
@@ -2261,10 +2261,10 @@ final public class Channel (T) : Selectable
 
     void close () nothrow
     {
-        this.lock.lock_nothrow();
-        if (!this.closed)
+        if (cas(&this.closed, false, true))
         {
-            this.closed = true;
+            this.lock.lock_nothrow();
+            scope (exit) this.lock.unlock_nothrow();
 
             // Wake blocked Fibers up, report the failure
             foreach (ref entry; this.readq)
@@ -2279,7 +2279,6 @@ final public class Channel (T) : Selectable
             this.readq.clear();
             this.writeq.clear();
         }
-        this.lock.unlock_nothrow();
     }
 
     /***********************************************************************
@@ -2301,11 +2300,9 @@ final public class Channel (T) : Selectable
 
     ***********************************************************************/
 
-    bool isClosed () nothrow
+    bool isClosed () const @safe pure nothrow @nogc scope
     {
-        this.lock.lock_nothrow();
-        scope (exit) this.lock.unlock_nothrow();
-        return this.closed;
+        return atomicLoad(this.closed);
     }
 
     /***********************************************************************
