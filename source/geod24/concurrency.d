@@ -749,6 +749,7 @@ public alias SelectReturn = Tuple!(bool, "success", int, "id");
     Params:
         read_list = List of `Channel`s to select for read operation
         write_list = List of `Channel`s to select for write operation
+        timeout = Optional timeout
 
     Return:
         Returns success/failure status of the operation and the index
@@ -758,7 +759,8 @@ public alias SelectReturn = Tuple!(bool, "success", int, "id");
 
 ***********************************************************************/
 
-public SelectReturn select (ref SelectEntry[] read_list, ref SelectEntry[] write_list, Duration timeout = Duration.init)
+public SelectReturn select (ref SelectEntry[] read_list, ref SelectEntry[] write_list,
+    Duration timeout = Duration.init)
 {
     import std.random : randomShuffle;
 
