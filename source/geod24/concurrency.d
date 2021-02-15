@@ -29,11 +29,6 @@
  * Authors:   Sean Kelly, Alex Rønne Petersen, Martin Nowak
  * Source:    $(PHOBOSSRC std/concurrency.d)
  */
-/*          Copyright Sean Kelly 2009 - 2014.
- * Distributed under the Boost Software License, Version 1.0.
- *    (See accompanying file LICENSE_1_0.txt or copy at
- *          http://www.boost.org/LICENSE_1_0.txt)
- */
 module geod24.concurrency;
 
 public import std.variant;
