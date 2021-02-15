@@ -1221,7 +1221,6 @@ unittest
     assert(test.pubkey() == 42);
     test.ctrl.shutdown(&onDestroy);
     thread_joinAll();
-    // ctr.shutdown call is asynchronous
     assert(dtor_called);
     assert(onDestroy_called);
     assert(shutdown_called);
