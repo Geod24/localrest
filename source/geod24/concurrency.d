@@ -141,7 +141,7 @@ public void thisScheduler (FiberScheduler value) nothrow
  * This is an example scheduler that creates a new Fiber per call to spawn
  * and multiplexes the execution of all fibers within the main thread.
  */
-class FiberScheduler
+public class FiberScheduler
 {
     /***************************************************************************
 
@@ -152,7 +152,7 @@ class FiberScheduler
 
     ***************************************************************************/
 
-    this (size_t max_parked_fibers = 8) nothrow
+    public this (size_t max_parked_fibers = 8) nothrow
     {
         this.sem = assumeWontThrow(new Semaphore());
         this.blocked_ex = new FiberBlockedException();
@@ -163,20 +163,20 @@ class FiberScheduler
      * This creates a new Fiber for the supplied op and then starts the
      * dispatcher.
      */
-    void start(void delegate() op)
+    void start (void delegate() op)
     {
-        create(op, true);
+        this.create(op, true);
         // Make sure the just-created fiber is run first
-        dispatch();
+        this.dispatch();
     }
 
     /**
      * This created a new Fiber for the supplied op and adds it to the
      * dispatch list.
      */
-    void spawn(void delegate() op) nothrow
+    void spawn (void delegate() op) nothrow
     {
-        create(op);
+        this.create(op);
         FiberScheduler.yield();
     }
 
@@ -193,7 +193,7 @@ class FiberScheduler
 
     **************************************************************************/
 
-    void schedule(void delegate() op) nothrow
+    public void schedule (void delegate() op) nothrow
     {
         this.create(op);
     }
@@ -202,7 +202,7 @@ class FiberScheduler
      * If the caller is a scheduled Fiber, this yields execution to another
      * scheduled Fiber.
      */
-    static void yield() nothrow
+    public static void yield () nothrow
     {
         // NOTE: It's possible that we should test whether the calling Fiber
         //       is an InfoFiber before yielding, but I think it's reasonable
@@ -215,7 +215,7 @@ class FiberScheduler
      * If the caller is a scheduled Fiber, this yields execution to another
      * scheduled Fiber.
      */
-    static void yieldAndThrow(Throwable t) nothrow
+    public static void yieldAndThrow (Throwable t) nothrow
     {
         // NOTE: It's possible that we should test whether the calling Fiber
         //       is an InfoFiber before yielding, but I think it's reasonable
@@ -225,7 +225,7 @@ class FiberScheduler
     }
 
     /// Resource type that will be tracked by FiberScheduler
-    interface Resource
+    protected interface Resource
     {
         ///
         void release () nothrow;
@@ -240,7 +240,7 @@ class FiberScheduler
 
     ***********************************************************************/
 
-    void addResource (Resource r, InfoFiber info_fiber = cast(InfoFiber) Fiber.getThis()) nothrow
+    private void addResource (Resource r, InfoFiber info_fiber = cast(InfoFiber) Fiber.getThis()) nothrow
     {
         assert(info_fiber, "Called from outside of an InfoFiber");
         info_fiber.resources.insert(r);
@@ -258,14 +258,13 @@ class FiberScheduler
 
     ***********************************************************************/
 
-    bool removeResource (Resource r, InfoFiber info_fiber = cast(InfoFiber) Fiber.getThis()) nothrow
+    private bool removeResource (Resource r, InfoFiber info_fiber = cast(InfoFiber) Fiber.getThis()) nothrow
     {
         assert(info_fiber, "Called from outside of an InfoFiber");
         // TODO: For some cases, search is not neccesary. We can just pop the last element
         return assumeWontThrow(info_fiber.resources.linearRemoveElement(r));
     }
 
-protected:
     /**
      * Creates a new Fiber which calls the given delegate.
      *
@@ -274,7 +273,7 @@ protected:
      *   insert_front = Fiber will be added to the front
      *                  of the ready queue to be run first
      */
-    void create (void delegate() op, bool insert_front = false) nothrow
+    protected void create (void delegate() op, bool insert_front = false) nothrow
     {
         InfoFiber new_fiber;
         if (this.parked_count > 0)
@@ -299,7 +298,7 @@ protected:
     /**
      * Fiber which embeds neccessary info for FiberScheduler
      */
-    static class InfoFiber : Fiber
+    protected static class InfoFiber : Fiber
     {
         /// Semaphore reference that this Fiber is blocked on
         FiberBlocker blocker;
@@ -330,7 +329,7 @@ protected:
         }
     }
 
-    final public class FiberBlocker
+    public final class FiberBlocker
     {
 
         /***********************************************************************
@@ -453,15 +452,13 @@ protected:
         shared(TimerState) timer_state;
     }
 
-private:
-
     /***********************************************************************
 
         Start the scheduling loop
 
     ***********************************************************************/
 
-    void dispatch ()
+    private void dispatch ()
     {
         thisScheduler(this);
         scope (exit) thisScheduler(null);
@@ -551,7 +548,7 @@ private:
 
     ***********************************************************************/
 
-    MonoTime wakeFibers()
+    private MonoTime wakeFibers()
     {
         import std.range;
         MonoTime earliest_timeout;
@@ -594,7 +591,7 @@ private:
 
     ***********************************************************************/
 
-    void releaseResources (InfoFiber cur_fiber)
+    private void releaseResources (InfoFiber cur_fiber)
     {
         foreach (ref resource; cur_fiber.resources)
             resource.release();
@@ -1274,7 +1271,7 @@ final public class Channel (T) : Selectable
 
         ***********************************************************************/
 
-        void release() nothrow
+        void release () nothrow
         {
             if (this.blocker.stopTimer())
                 this.pVal = null; // Sanitize pVal so that we can catch illegal accesses
