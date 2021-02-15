@@ -728,7 +728,7 @@ public SelectReturn select (ref SelectEntry[] read_list, ref SelectEntry[] write
 {
     import std.random : randomShuffle;
 
-    auto ss = new SelectState();
+    auto ss = new SelectState(thisScheduler().new FiberBlocker());
     int sel_id = 0;
     thisScheduler().addResource(ss);
     scope (exit) thisScheduler().removeResource(ss);
@@ -775,9 +775,9 @@ final private class SelectState : FiberScheduler.Resource
 
     ***********************************************************************/
 
-    this () nothrow
+    this (FiberScheduler.FiberBlocker blocker) @safe pure nothrow @nogc
     {
-        this.blocker = thisScheduler().new FiberBlocker();
+        this.blocker = blocker;
     }
 
     /***********************************************************************
