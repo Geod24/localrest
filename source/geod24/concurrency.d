@@ -87,34 +87,6 @@ private
         static struct Container { SysTime time; }
         static assert(!hasLocalAliasing!(SysTime, Container));
     }
-
-    void checkops(T...)(T ops)
-    {
-        import std.format : format;
-
-        foreach (i, t1; T)
-        {
-            static assert(isFunctionPointer!t1 || isDelegate!t1,
-                    format!"T %d is not a function pointer or delegates"(i));
-            alias a1 = Parameters!(t1);
-            alias r1 = ReturnType!(t1);
-
-            static if (i < T.length - 1 && is(r1 == void))
-            {
-                static assert(a1.length != 1 || !is(a1[0] == Variant),
-                              "function with arguments " ~ a1.stringof ~
-                              " occludes successive function");
-
-                foreach (t2; T[i + 1 .. $])
-                {
-                    alias a2 = Parameters!(t2);
-
-                    static assert(!is(a1 == a2),
-                        "function with arguments " ~ a1.stringof ~ " occludes successive function");
-                }
-            }
-        }
-    }
 }
 
 // Exceptions
