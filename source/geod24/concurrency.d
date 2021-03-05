@@ -852,7 +852,8 @@ private:
 
 ***********************************************************************/
 
-final public class Channel (T) : Selectable
+final public class Channel (T, ChannelMutex = FiberMutex,
+    ChannelBlocker = FiberScheduler.FiberBlocker) : Selectable
 {
     /***********************************************************************
 
@@ -868,7 +869,7 @@ final public class Channel (T) : Selectable
     this (ulong max_size = 0) nothrow
     {
         this.max_size = max_size;
-        this.lock = new FiberMutex;
+        this.lock = new ChannelMutex;
         if (max_size)
             this.buffer = new RingBuffer!T(max_size);
     }
@@ -1221,7 +1222,7 @@ final public class Channel (T) : Selectable
     private static class ChannelQueueEntry : FiberScheduler.Resource
     {
         /// FiberBlocker blocking the `Fiber`
-        FiberScheduler.FiberBlocker blocker;
+        ChannelBlocker blocker;
 
         /// Pointer to the variable that we will read to/from
         T* pVal;
@@ -1244,7 +1245,10 @@ final public class Channel (T) : Selectable
             if (this.select_state)
                 this.blocker = this.select_state.blocker;
             else
-                this.blocker = thisScheduler().new FiberBlocker();
+                static if (is(ChannelBlocker : FiberScheduler.FiberBlocker))
+                    this.blocker = thisScheduler().new FiberBlocker();
+                else
+                    this.blocker = new ChannelBlocker;
         }
 
         /***********************************************************************
@@ -1380,7 +1384,7 @@ private:
     bool closed;
 
     /// Per channel lock
-    FiberMutex lock;
+    ChannelMutex lock;
 
     /// List of fibers blocked on read()
     DList!ChannelQueueEntry readq;
