@@ -723,8 +723,9 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
         void runNode ()
         {
-            scope node = new Implementation(cargs);
             scheduler = new C.FiberScheduler;
+            C.thisScheduler(scheduler);
+            scope node = new Implementation(cargs);
 
             // Control the node behavior
             Control control;
@@ -2502,4 +2503,40 @@ unittest
         Listener!APIExtended(node.ctrl.listener().data));
     assert(extnode.required() == 42);
     assertThrown!ClientException(extnode.optional());
+}
+
+/// test that runTask works in the constructor
+unittest
+{
+    __gshared bool called;
+    static interface API
+    {
+    @safe:
+        public @property ulong pubkey ();
+    }
+
+    static class MockAPI : API
+    {
+    @safe:
+        this () @trusted
+        {
+            runTask(&callMe);
+        }
+
+        void callMe () @trusted
+        {
+            called = true;
+        }
+
+        public override @property ulong pubkey () { return 42; }
+    }
+
+    scope test = RemoteAPI!API.spawn!MockAPI();
+    scope (exit)
+    {
+        test.ctrl.shutdown();
+        thread_joinAll();
+    }
+    assert(test.pubkey() == 42);
+    assert(called);
 }
