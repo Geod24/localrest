@@ -270,9 +270,12 @@ private class Connection
 
     *******************************************************************************/
 
-    bool sendCommand (T) (T msg) @trusted
+    bool sendCommand (T) (auto ref T msg) @trusted
     {
         bool ret;
+
+        static if (is (T : Command))
+            msg.id = this.getNextCommandId();
 
         if (isMainThread())
             scheduler.start({ ret = this.command_chn.write(Variant(msg)); });
@@ -615,6 +618,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
           timeout = (optional) timeout to use with requests
           file = Path to the file that called this function (for diagnostic)
           line = Line number tied to the `file` parameter
+          retry = re-try failed requests
 
         Returns:
           A `RemoteAPI` owning the node reference
@@ -622,7 +626,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
     ***************************************************************************/
 
     public static RemoteAPI spawn (Impl) (
-        CtorParams!Impl args, Duration timeout = 5.seconds,
+        CtorParams!Impl args, Duration timeout = 5.seconds, bool retry = true,
         string file = __FILE__, int line = __LINE__)
     {
         auto chn = new BindChn();
@@ -630,7 +634,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         {
             spawned!(Impl)(chn, file, line, args);
         }).start();
-        return new RemoteAPI(Listener!API(chn), timeout);
+        return new RemoteAPI(Listener!API(chn), timeout, retry);
     }
 
     /// Helper template to get the constructor's parameters
@@ -872,6 +876,9 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
     /// Connection between this instance and the node main thread
     private Connection conn;
 
+    /// Enable re-try of failed requests
+    private bool retry;
+
     /***************************************************************************
 
         Create an instante of a client
@@ -883,26 +890,56 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
           listener = The listener used to connect to the node (most frequently
                      obtained by calling `geod24.concurrency.locate`)
           timeout = any timeout to use
+          retry = re-try failed requests
 
     ***************************************************************************/
 
-    public this (Listener!API listener, Duration timeout = 5.seconds)
-        @trusted nothrow
+    public this (Listener!API listener, Duration timeout = 5.seconds,
+        bool retry = true) @safe nothrow
+    {
+        this.bind_chn = listener.data;
+        this.timeout = timeout;
+        this.retry = retry;
+        assert(bind_chn);
+    }
+
+    ///
+    private bool connect () @trusted
     {
         import std.exception : assumeWontThrow;
 
-        this.bind_chn = listener.data;
-        this.timeout = timeout;
-        assert(bind_chn);
+        if (this.conn)
+        {
+            outgoing_conns.remove(this.conn.resp_chn);
+            this.conn.close();
+        }
 
         // Create a new Connection, register it and send it to the peer
-        // TODO: What to do when bind_chn is closed?
         this.conn = new Connection();
         outgoing_conns[this.conn.resp_chn] = this.conn;
+        bool ret;
         if (isMainThread())
-            assumeWontThrow(scheduler.start({ bind_chn.write(this.conn); }));
+            assumeWontThrow(scheduler.start({ ret = bind_chn.write(this.conn); }));
         else
-            bind_chn.write(this.conn);
+            ret = bind_chn.write(this.conn);
+        return ret;
+    }
+
+    ///
+    private bool sendCommand (T) (auto ref T msg, bool retry) @trusted
+    {
+        if (!this.conn && !this.connect())
+            return false;
+        if (!this.conn.sendCommand(msg))
+            if (!retry || !this.connect() || !this.conn.sendCommand(msg))
+                return false;
+        return true;
+    }
+
+    ///
+    private bool sendCommand (T) (auto ref T msg) @trusted
+    {
+        return this.sendCommand(msg, this.retry);
     }
 
     /***************************************************************************
@@ -952,7 +989,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         public void shutdown (void function (Object) callback = null)
             @trusted
         {
-            this.conn.sendCommand(ShutdownCommand(callback, false));
+            assert(this.sendCommand(ShutdownCommand(callback, false), false));
         }
 
         /***********************************************************************
@@ -972,7 +1009,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         public void restart (void function (Object) callback = null)
             @trusted
         {
-            this.conn.sendCommand(ShutdownCommand(callback, true));
+            assert(this.sendCommand(ShutdownCommand(callback, true), false));
         }
 
         /***********************************************************************
@@ -989,7 +1026,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
         public void sleep (Duration d, bool dropMessages = false) @trusted
         {
-            this.conn.sendCommand(TimeCommand(d, dropMessages));
+            assert(this.sendCommand(TimeCommand(d, dropMessages), false));
         }
 
         /***********************************************************************
@@ -1068,7 +1105,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                 enum mangled = getBestMatch!Overloads;
             }
 
-            this.conn.sendCommand(FilterAPI(mangled, pretty));
+            assert(this.sendCommand(FilterAPI(mangled, pretty), false));
         }
 
 
@@ -1080,7 +1117,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
         public void clearFilter () @trusted
         {
-            this.conn.sendCommand(FilterAPI(""));
+            assert(this.sendCommand(FilterAPI(""), false));
         }
 
         /***********************************************************************
@@ -1110,6 +1147,20 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                           fullyQualifiedName!API ~ "`");
             dg(api);
         }
+
+        /***********************************************************************
+
+            Initialize a new connection to the peer
+
+            Returns:
+                Success/Failure
+
+        ***********************************************************************/
+
+        public bool reconnect () @trusted
+        {
+            return this.connect();
+        }
     }
 
     // Vibe.d mandates that method must be @safe
@@ -1132,9 +1183,12 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                     // this overload needs to be
                     auto res = () @trusted {
                         auto serialized = S.serialize(ArgWrapper!(Parameters!ovrld)(params));
-                        auto command = Command(this.conn.getNextCommandId(), ovrld.mangleof, SerializedData(serialized));
+                        auto command = Command(0, // id is set by sendCommand
+                            ovrld.mangleof,
+                            SerializedData(serialized)
+                        );
 
-                        if(!this.conn.sendCommand(command))
+                        if(!this.sendCommand(command))
                             throw new Exception("Connection with peer closed");
                         return this.conn.waitResponse(command.id, this.timeout);
                     }();
@@ -2245,10 +2299,12 @@ unittest
     auto node1 = RemoteAPI!API.spawn!Node(500.msecs);
     auto node2 = RemoteAPI!API.spawn!Node();
     scope (exit) {
-        node1.ctrl.shutdown();
         node2.ctrl.shutdown();
         thread_joinAll();
     }
+    scope (failure)
+        node1.ctrl.shutdown();
+
     node1Addr = node1.ctrl.listener();
     node2Addr = node2.ctrl.listener();
 
@@ -2404,6 +2460,7 @@ unittest
     auto node1 = RemoteAPI!API.spawn!Node(500.msecs);
     auto node2 = RemoteAPI!API.spawn!Node();
     scope (exit) {
+        node1.ctrl.reconnect();
         node1.ctrl.shutdown();
         node2.ctrl.shutdown();
         thread_joinAll();
