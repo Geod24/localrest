@@ -289,14 +289,14 @@ private class Connection
 
         Params:
             resp_id = Response id to wait for
-            timeout = optional timeout duration for the operation
+            timeout = timeout duration for the operation
 
         Returns:
             Response
 
     *******************************************************************************/
 
-    Response waitResponse (size_t resp_id, Duration timeout = Duration.init) @trusted
+    Response waitResponse (size_t resp_id, Duration timeout) @trusted
     {
         if (isMainThread())
         {
@@ -589,7 +589,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
     ***************************************************************************/
 
     public static RemoteAPI spawn (Impl) (
-        CtorParams!Impl args, Duration timeout = Duration.init,
+        CtorParams!Impl args, Duration timeout = 5.seconds,
         string file = __FILE__, int line = __LINE__)
     {
         auto chn = new BindChn();
@@ -881,7 +881,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
     ***************************************************************************/
 
-    public this (Listener!API listener, Duration timeout = Duration.init)
+    public this (Listener!API listener, Duration timeout = 5.seconds)
         @trusted nothrow
     {
         import std.exception : assumeWontThrow;
