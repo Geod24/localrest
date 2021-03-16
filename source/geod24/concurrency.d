@@ -736,18 +736,18 @@ public SelectReturn select (ref SelectEntry[] read_list, ref SelectEntry[] write
     read_list = read_list.randomShuffle();
     write_list = write_list.randomShuffle();
 
-    foreach (ref list; [read_list, write_list])
+    foreach (ref entry; read_list)
     {
-        foreach (ref entry; list)
-        {
-            if (ss.isConsumed())
-                break;
+        if (ss.isConsumed())
+            break;
+        entry.selectable.selectRead(entry.select_data, ss, sel_id++);
+    }
 
-            if (list is read_list)
-                entry.selectable.selectRead(entry.select_data, ss, sel_id++);
-            else if (list is write_list)
-                entry.selectable.selectWrite(entry.select_data, ss, sel_id++);
-        }
+    foreach (ref entry; write_list)
+    {
+        if (ss.isConsumed())
+            break;
+        entry.selectable.selectWrite(entry.select_data, ss, sel_id++);
     }
 
     if (!ss.blocker.wait(timeout))
