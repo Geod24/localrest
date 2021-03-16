@@ -386,9 +386,6 @@ public alias BindChn = C.Channel!Connection;
 /// Thread local outgoing `Connection` list
 private Connection[RespChn] outgoing_conns;
 
-/// Thread local incoming `Connection` list
-private Connection[CommandChn] incoming_conns;
-
 /// We need a scheduler to simulate an event loop and to be re-entrant
 private C.FiberScheduler scheduler;
 
@@ -720,6 +717,10 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         }
 
         scope exc = new ExitException();
+
+        // The list of `Connection` we are listening to,
+        // equivalent to the list of fd in a select / epoll.
+        Connection[CommandChn] incoming_conns;
 
         void runNode ()
         {
