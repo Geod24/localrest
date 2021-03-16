@@ -440,7 +440,7 @@ private bool isMainThread () @trusted nothrow
     // we are in the main thread
     if (scheduler is null)
         scheduler = new C.FiberScheduler;
-    return C.thisScheduler() is null;
+    return Fiber.getThis() is null;
 }
 
 /*******************************************************************************
@@ -463,7 +463,7 @@ private bool isMainThread () @trusted nothrow
 
 public void runTask (void delegate() dg) nothrow
 {
-    assert(!isMainThread(), "Cannot call this function from the main thread");
+    assert(scheduler !is null, "Cannot call this delegate from the main thread");
     scheduler.spawn(dg);
 }
 
