@@ -103,6 +103,8 @@ module geod24.LocalRest;
 
 static import C = geod24.concurrency;
 import geod24.Serialization;
+
+import std.datetime.systime : Clock, SysTime;
 import std.format;
 import std.meta : AliasSeq;
 import std.traits : fullyQualifiedName, Parameters, ReturnType;
@@ -187,6 +189,17 @@ public class ClientException : Exception
         @safe pure nothrow
     {
         super(msg, file, line, next);
+    }
+}
+
+/// Simple exception to unwind the stack when we need to terminate/restart
+private final class ExitException : Exception
+{
+    public bool restart;
+
+    this () @safe pure nothrow @nogc
+    {
+        super("You should never see this exception - please report a bug");
     }
 }
 
@@ -379,6 +392,29 @@ private class Connection
     /// Channel to read `Response`s from
     private RespChn resp_chn;
 }
+
+private struct AwaitingMessage
+{
+    /// Message
+    public Variant var;
+    /// Originating `Connection`
+    public Connection conn;
+}
+
+// Used for controling filtering / sleep within the server implementation
+private struct Control
+{
+    public FilterAPI filter;    // filter specific messages
+    public SysTime sleep_until; // sleep until this time
+    public bool drop;           // drop messages if sleeping
+
+    bool isSleeping () const @safe /* nothrow: Not `nothrow` on Windows */
+    {
+        return this.sleep_until != SysTime.init
+            && Clock.currTime < this.sleep_until;
+    }
+}
+
 
 /// `Channel` type that the nodes will listen for new `Connection`s
 public alias BindChn = C.Channel!Connection;
@@ -687,34 +723,8 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         BindChn bind_chn, string file, int line, CtorParams!Implementation cargs)
         nothrow
     {
-        import std.datetime.systime : Clock, SysTime;
         import std.algorithm : each;
         import std.range;
-
-        /// Simple exception unwind the stack when we need to terminate/restart
-        static final class ExitException : Exception
-        {
-            bool restart;
-
-            this () @safe pure nothrow @nogc
-            {
-                super("You should never see this exception - please report a bug");
-            }
-        }
-
-        // used for controling filtering / sleep
-        static struct Control
-        {
-            FilterAPI filter;    // filter specific messages
-            SysTime sleep_until; // sleep until this time
-            bool drop;           // drop messages if sleeping
-
-            bool isSleeping() const
-            {
-                return this.sleep_until != SysTime.init
-                    && Clock.currTime < this.sleep_until;
-            }
-        }
 
         scope exc = new ExitException();
 
@@ -730,13 +740,6 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
             // Control the node behavior
             Control control;
 
-            struct AwaitingMessage
-            {
-                /// Message
-                Variant var;
-                /// Originating `Connection`
-                Connection conn;
-            }
             // we need to keep track of messages which were ignored when
             // node.sleep() was used, and then handle each message in sequence.
             AwaitingMessage[] await_msgs;
