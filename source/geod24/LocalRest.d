@@ -732,12 +732,12 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
         scope exc = new ExitException();
 
-        // The list of `Connection` we are listening to,
-        // equivalent to the list of fd in a select / epoll.
-        Connection[CommandChn] incoming_conns;
-
         void runNode ()
         {
+            // The list of `Connection` we are listening to,
+            // equivalent to the list of fd in a select / epoll.
+            Connection[CommandChn] incoming_conns;
+
             scheduler = new C.FiberScheduler;
             C.thisScheduler(scheduler);
             scope node = new Implementation(cargs);
@@ -808,10 +808,8 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                             case Variant.Type.shutdownCommand:
                                 ShutdownCommand e = msg.shutdown;
                                 if (!e.restart)
-                                {
                                     bind_chn.close();
-                                    incoming_conns.each!((conn) => conn.close());
-                                }
+                                incoming_conns.each!((conn) => conn.close());
                                 outgoing_conns.each!((conn) => conn.close());
                                 outgoing_conns.clear();
                                 if (e.callback !is null)
