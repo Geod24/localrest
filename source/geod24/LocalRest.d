@@ -770,12 +770,14 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
                     auto sel_ret = C.select(read_list, write_list, 10.msecs);
 
-                    if (!control.isSleeping())
+                    if (await_msgs.length > 0 && !control.isSleeping())
                     {
-                        foreach (ref await_msg; await_msgs)
-                            handleCommand(await_msg.var.cmd, node, control.filter, await_msg.conn.resp_chn);
+                        scheduler.spawn({
+                            auto prev_await_msgs = await_msgs;
+                            foreach (ref await_msg; prev_await_msgs)
+                                handleCommand(await_msg.var.cmd, node, control.filter, await_msg.conn.resp_chn);
+                        });
                         await_msgs.length = 0;
-                        assumeSafeAppend(await_msgs);
                     }
 
                     if (!sel_ret.success)
@@ -2543,4 +2545,48 @@ unittest
     }
     assert(test.pubkey() == 42);
     assert(called);
+}
+
+// Self connection deadlock scenario
+// without the proper fix, this test should hang
+unittest
+{
+    import core.atomic;
+
+    static interface API
+    {
+        @safe:
+        public void call0 ();
+        public int get44 ();
+    }
+
+    __gshared Listener!API node1Addr;
+
+    static class Node : API
+    {
+        private RemoteAPI!API self;
+
+        @trusted:
+        public override void call0 ()
+        {
+            this.self = new RemoteAPI!API(atomicLoad(node1Addr));
+            this.self.ctrl.sleep(1.seconds);
+            assert(this.self.get44() == 44);
+        }
+
+        public override int get44 ()
+        {
+            return 44;
+        }
+    }
+
+    auto node1 = RemoteAPI!API.spawn!Node();
+    scope (exit)
+    {
+        node1.ctrl.shutdown();
+        thread_joinAll();
+    }
+
+    atomicStore(node1Addr, node1.ctrl.listener());
+    node1.call0();
 }
