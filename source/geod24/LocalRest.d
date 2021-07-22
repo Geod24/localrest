@@ -519,6 +519,8 @@ public final class Timer
     private bool periodic;
     // Whether this timer was stopped
     private bool stopped;
+    // Whether this timer has a Fiber running
+    private bool running;
 
     public this (Duration timeout, void delegate() dg, bool periodic) @safe nothrow
     {
@@ -526,11 +528,13 @@ public final class Timer
         this.dg = dg;
         this.periodic = periodic;
         this.stopped = false;
+        this.running = true;
     }
 
     // Run a delegate after timeout, and until this.periodic is false
     private void run ()
     {
+        scope (exit) this.running = false;
         do
         {
             sleep(timeout);
@@ -546,6 +550,19 @@ public final class Timer
     {
         this.stopped = true;
         this.periodic = false;
+    }
+
+    /// Rearm a stopped timer
+    public void rearm (Duration timeout, bool periodic) nothrow
+    {
+        this.timeout = timeout;
+        this.periodic = periodic;
+        this.stopped = false;
+        if (!this.running)
+        {
+            this.running = true;
+            scheduler.schedule(&run);
+        }
     }
 }
 
@@ -2277,6 +2294,7 @@ unittest
         public void stopTimer ();
         public ulong getCounter ();
         public void resetCounter ();
+        public void fireTimer ();
     }
 
     static class Node : API
@@ -2292,6 +2310,11 @@ unittest
         public override void stopTimer ()
         {
             this.timer.stop();
+        }
+
+        public override void fireTimer ()
+        {
+            this.timer.rearm(0.msecs, false);
         }
 
         public void callback ()
@@ -2329,6 +2352,9 @@ unittest
     node.stopTimer();
     core.thread.Thread.sleep(500.msecs);
     assert(node.getCounter() == 0);
+    node.fireTimer();
+    core.thread.Thread.sleep(500.msecs);
+    assert(node.getCounter() == 1);
 }
 
 /// Test restarting a node
