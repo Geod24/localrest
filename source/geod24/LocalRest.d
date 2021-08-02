@@ -870,7 +870,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         }
         catch (Throwable t)
         {
-            import core.stdc.stdio, std.stdio;
+            import core.stdc.stdio, core.stdc.stdlib, std.stdio;
             printf("#### FATAL ERROR: %.*s\n", cast(int) t.msg.length, t.msg.ptr);
             printf("This node was started at %.*s:%d\n",
                    cast(int) file.length, file.ptr, line);
@@ -879,6 +879,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
             try writeln("Full error: ", t);
             catch (Exception e) { /* Nothing more we can do at this point */ }
+            abort();
         }
     }
 
