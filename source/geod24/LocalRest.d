@@ -879,6 +879,9 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
             try writeln("Full error: ", t);
             catch (Exception e) { /* Nothing more we can do at this point */ }
+            // Workaround Github CI issue:
+            // https://github.com/actions/runner/issues/1235
+            fflush(core.stdc.stdio.stdout);
             abort();
         }
     }
