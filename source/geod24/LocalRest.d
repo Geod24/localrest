@@ -130,6 +130,8 @@ private struct TimeCommand
     Duration dur;
     /// Whether or not affected messages should be dropped
     bool drop = false;
+    /// Whether or not all tasks should be suspended
+    bool suspend = false;
 }
 
 /// Ask the node to shut down
@@ -407,6 +409,7 @@ private struct Control
     public FilterAPI filter;    // filter specific messages
     public SysTime sleep_until; // sleep until this time
     public bool drop;           // drop messages if sleeping
+    public bool suspend;        // suspend all other tasks
 
     bool isSleeping () const @safe /* nothrow: Not `nothrow` on Windows */
     {
@@ -787,6 +790,12 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
                     auto sel_ret = C.select(read_list, write_list, 10.msecs);
 
+                    if (control.suspend && !control.isSleeping())
+                    {
+                        C.thisScheduler().exitCriticalSection();
+                        control.suspend = false;
+                    }
+
                     if (await_msgs.length > 0 && !control.isSleeping())
                     {
                         scheduler.spawn({
@@ -837,6 +846,9 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                                 TimeCommand s = msg.time;
                                 control.sleep_until = Clock.currTime + s.dur;
                                 control.drop = s.drop;
+                                control.suspend = s.suspend;
+                                if (control.suspend)
+                                    C.thisScheduler().enterCriticalSection();
                                 break;
                             case Variant.Type.filter:
                                 FilterAPI filter_api = msg.filter;
@@ -1012,7 +1024,24 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
         public void sleep (Duration d, bool dropMessages = false) @trusted
         {
-            this.conn.sendCommand(TimeCommand(d, dropMessages));
+            this.conn.sendCommand(TimeCommand(d, dropMessages, true));
+        }
+
+        /***********************************************************************
+
+            Make the remote node ignore messages for `Duration`
+
+            Params:
+              delay = Duration the node will ignore messages
+              dropMessages = Whether to process the pending requests when the
+                             node come back online (the default), or to drop
+                             pending traffic
+
+        ***********************************************************************/
+
+        public void deafen (Duration d, bool dropMessages = false) @trusted
+        {
+            this.conn.sendCommand(TimeCommand(d, dropMessages, false));
         }
 
         /***********************************************************************
@@ -2359,6 +2388,19 @@ unittest
     node.fireTimer();
     core.thread.Thread.sleep(500.msecs);
     assert(node.getCounter() == 1);
+
+    node.resetCounter();
+    node.startTimer(true);
+    node.ctrl.deafen(1.seconds);
+    // timer will continue ticking for that duration
+    assert(node.getCounter() == 3);
+    node.stopTimer();
+
+    node.resetCounter();
+    node.startTimer(true);
+    node.ctrl.sleep(1.seconds);
+    // timer will not fire for that duration, maybe only once
+    assert(node.getCounter() < 3);
 }
 
 /// Test restarting a node
