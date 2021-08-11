@@ -470,6 +470,10 @@ public class FiberScheduler
             while (!readyq.empty())
             {
                 InfoFiber cur_fiber = this.readyq.front();
+                if (this.critical_section_fiber &&
+                    cur_fiber !is this.critical_section_fiber)
+                    break;
+
                 this.readyq.removeFront();
 
                 assert(cur_fiber.state != Fiber.State.TERM);
@@ -502,7 +506,10 @@ public class FiberScheduler
 
                 if (cur_fiber.state != Fiber.State.TERM)
                 {
-                    this.readyq.insert(cur_fiber);
+                    if (this.critical_section_fiber is cur_fiber)
+                        this.readyq.insertFront(cur_fiber);
+                    else
+                        this.readyq.insertBack(cur_fiber);
                 }
                 // Park terminated Fiber
                 else if (this.parked_count < this.max_parked)
@@ -564,7 +571,10 @@ public class FiberScheduler
             {
                 this.wait_list.popFirstOf(wait_range);
                 fiber.blocker = null;
-                this.readyq.insert(fiber);
+                if (this.critical_section_fiber is fiber)
+                    this.readyq.insertFront(fiber);
+                else
+                    this.readyq.insertBack(fiber);
             }
             else
             {
@@ -603,6 +613,20 @@ public class FiberScheduler
                 resource.release();
     }
 
+    /// Disables Fiber switching
+    public void enterCriticalSection () nothrow
+    {
+        this.critical_section_fiber = cast(InfoFiber) Fiber.getThis();
+        assert(this.critical_section_fiber !is null);
+    }
+
+    /// Enables Fiber switching
+    public void exitCriticalSection () nothrow
+    {
+        assert(this.critical_section_fiber is cast(InfoFiber) Fiber.getThis());
+        this.critical_section_fiber = null;
+    }
+
 private:
 
     /// OS semaphore for scheduler to sleep on
@@ -625,6 +649,9 @@ private:
 
     /// Maximum number of parked fibers
     immutable size_t max_parked;
+
+    /// InfoFiber that is in critical section
+    InfoFiber critical_section_fiber;
 }
 
 /// Ensure argument to `start` is run first
@@ -2095,4 +2122,47 @@ class FiberMutex : FiberSemaphore
     t3.start();
 
     thread_joinAll();
+}
+
+@system unittest
+{
+    import std;
+    FiberScheduler scheduler = new FiberScheduler;
+    int count;
+
+    scheduler.spawn(
+        () {
+            assert(count == 2);
+            count++;
+        }
+    );
+
+    scheduler.start(
+        () {
+            thisScheduler().enterCriticalSection();
+
+            // this will yield
+            scheduler.spawn(
+                () {
+                    assert(count == 3);
+                    count++;
+                }
+            );
+
+            thisScheduler().yield();
+            // execution should still come back to us
+            assert(count == 0);
+            count++;
+
+            scope blocker = thisScheduler().new FiberBlocker();
+            blocker.wait(10.msecs);
+
+            assert(count == 1);
+            count++;
+
+            thisScheduler().exitCriticalSection();
+            thisScheduler().yield();
+            assert(count == 4);
+        }
+    );
 }
