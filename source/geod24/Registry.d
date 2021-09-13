@@ -115,6 +115,24 @@ public shared struct Registry (API)
             return false;
         }
     }
+
+    /**
+     * Clear out the content of the registry
+     *
+     * This routine is useful when performing shutdown,
+     * as some nodes might try to access others in parallel,
+     * leading to error on closed channels.
+     * Calling `clear` before starting to shut down node essentially
+     * ensures that nodes are not reachable anymore.
+     */
+    public void clear ()
+    {
+        synchronized (registryLock)
+        {
+            (cast() this.connections).clear();
+            (cast() this.names).clear();
+        }
+    }
 }
 
 /// An untyped network router
@@ -146,5 +164,11 @@ public shared struct AnyRegistry
     public bool unregister (string name)
     {
         return this.impl.unregister(name);
+    }
+
+    /// See `Registry.clear`
+    public void clear ()
+    {
+        this.impl.clear();
     }
 }
