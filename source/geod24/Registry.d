@@ -3,11 +3,17 @@
     Registry implementation for multi-threaded access
 
     This registry allows to look up a connection based on a `string`.
-    Conceptually, it can be seen as an equivalent to a DNS server,
-    as it turns symbolic names into "concrete" addresses (pointers).
+    Conceptually, it can be seen as an equivalent to a network router,
+    as it turns addresses into "concrete" routes (pointers).
 
     It was originally part of the `std.concurrency` module,
     but was extracted to make it reusable.
+
+    There are two kinds of registries: typed ones (`Registry`), which will
+    provide a bit more type safety for network without intersection, or with
+    a base type, and untyped one (`AnyRegistry). The latter matches real-world
+    heterogenous networks better, as it allows to store unrelated nodes in the
+    same data structure.
 
 *******************************************************************************/
 
@@ -17,7 +23,7 @@ import core.sync.mutex;
 import geod24.concurrency;
 import geod24.LocalRest;
 
-/// Ditto
+/// A typed network router
 public shared struct Registry (API)
 {
     /// Map from a name to a connection.
@@ -108,5 +114,37 @@ public shared struct Registry (API)
             }
             return false;
         }
+    }
+}
+
+/// An untyped network router
+public shared struct AnyRegistry
+{
+    /// This struct just presents a different API, but forwards to
+    /// an instance of `Registry!(void*)` under the hood.
+    private Registry!(void*) impl;
+
+    /// See `Registry.initialize`
+    public void initialize () @safe nothrow
+    {
+        this.impl.initialize();
+    }
+
+    /// See `Registry.locate`
+    public Listener!API locate (API = void*) (string name)
+    {
+        return cast(Listener!API) this.impl.locate(name);
+    }
+
+    /// See `Registry.register`
+    public bool register (ListenerT : Listener!APIT, APIT) (string name, ListenerT conn)
+    {
+        return this.impl.register(name, cast(Listener!(void*)) conn);
+    }
+
+    /// See `Registry.unregister`
+    public bool unregister (string name)
+    {
+        return this.impl.unregister(name);
     }
 }
