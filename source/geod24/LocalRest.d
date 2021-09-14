@@ -921,8 +921,9 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
 
     ***************************************************************************/
 
-    public this (Listener!API listener, Duration timeout = 5.seconds)
+    public this (IncomingAPI) (Listener!IncomingAPI listener, Duration timeout = 5.seconds)
         @trusted nothrow
+    if (is(IncomingAPI : API))
     {
         import std.exception : assumeWontThrow;
 
