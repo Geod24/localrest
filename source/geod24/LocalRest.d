@@ -543,6 +543,8 @@ public final class Timer
     private bool stopped;
     // Whether this timer has a Fiber running
     private bool running;
+    // Whether this timer is waiting for timeout
+    private bool _pending;
 
     public this (void delegate() dg) @safe nothrow
     {
@@ -553,10 +555,16 @@ public final class Timer
     // Run a delegate after timeout, and until this.periodic is false
     private void run ()
     {
-        scope (exit) this.running = false;
+        scope (exit)
+        {
+            this.running = false;
+            this._pending = false;
+        }
         do
         {
+            this._pending = true;
             sleep(timeout);
+            this._pending = false;
             if (this.stopped)
                 return;
             dg();
@@ -582,6 +590,12 @@ public final class Timer
             this.running = true;
             scheduler.schedule(&run);
         }
+    }
+
+    /// True if timer is yet to fire
+    @property bool pending () @safe nothrow
+    {
+        return this._pending;
     }
 }
 
@@ -2345,6 +2359,7 @@ unittest
         public ulong getCounter ();
         public void resetCounter ();
         public void fireTimer ();
+        public bool isPending ();
     }
 
     static class Node : API
@@ -2384,6 +2399,11 @@ unittest
         {
             this.counter = 0;
         }
+
+        public override bool isPending ()
+        {
+            return this.timer.pending;
+        }
     }
 
     auto node = RemoteAPI!API.spawn!Node();
@@ -2393,6 +2413,7 @@ unittest
     }
     assert(node.getCounter() == 0);
     node.startTimer(true);
+    assert(node.isPending);
     core.thread.Thread.sleep(1.seconds);
     // The expected count is 3
     // Check means the timer repeated and the timer stoped
