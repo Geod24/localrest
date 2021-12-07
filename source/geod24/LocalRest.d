@@ -506,11 +506,30 @@ public Timer setTimer (Duration timeout, void delegate() dg,
     bool periodic = false) nothrow
 {
     assert(scheduler !is null, "Cannot call this delegate from the main thread");
-    assert(dg !is null, "Cannot call this delegate if null");
 
-    Timer timer = new Timer(timeout, dg, periodic);
-    scheduler.schedule(&timer.run);
+    Timer timer = createTimer(dg);
+    timer.rearm(timeout, periodic);
     return timer;
+}
+
+/*******************************************************************************
+
+    Creates a new timer without arming it
+
+    Works similarly to Vibe.d's `createTimer`
+
+    Params:
+        dg = If non-null, this delegate will be called when the timer fires
+
+    Returns:
+        A `Timer` instance with the ability to control the timer
+
+*******************************************************************************/
+
+public Timer createTimer (void delegate() dg) nothrow
+{
+    assert(dg !is null, "Cannot call this delegate if null");
+    return new Timer(dg);
 }
 
 /// Simple timer
@@ -525,13 +544,10 @@ public final class Timer
     // Whether this timer has a Fiber running
     private bool running;
 
-    public this (Duration timeout, void delegate() dg, bool periodic) @safe nothrow
+    public this (void delegate() dg) @safe nothrow
     {
-        this.timeout = timeout;
         this.dg = dg;
-        this.periodic = periodic;
-        this.stopped = false;
-        this.running = true;
+        this.stopped = true;
     }
 
     // Run a delegate after timeout, and until this.periodic is false
