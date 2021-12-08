@@ -503,7 +503,7 @@ public void sleep (Duration timeout) nothrow
 *******************************************************************************/
 
 public Timer setTimer (Duration timeout, void delegate() @safe nothrow dg,
-    bool periodic = false) nothrow
+    bool periodic = false) @safe nothrow
 {
     assert(scheduler !is null, "Cannot call this delegate from the main thread");
 
@@ -526,7 +526,7 @@ public Timer setTimer (Duration timeout, void delegate() @safe nothrow dg,
 
 *******************************************************************************/
 
-public Timer createTimer (void delegate() @safe nothrow dg) nothrow
+public Timer createTimer (void delegate() @safe nothrow dg) @safe nothrow
 {
     assert(dg !is null, "Cannot call this delegate if null");
     return new Timer(dg);
@@ -546,8 +546,8 @@ public final class Timer
     // Whether this timer is waiting for timeout
     private bool _pending;
 
-    @safe:
-    public this (void delegate() @safe nothrow dg) nothrow
+    @safe nothrow:
+    public this (void delegate() @safe nothrow dg)
     {
         this.dg = dg;
         this.stopped = true;
@@ -577,14 +577,14 @@ public final class Timer
 
     /// Stop the timer. The next time this timer's fiber wakes up
     /// it will exit the run() function.
-    public void stop () nothrow
+    public void stop ()
     {
         this.stopped = true;
         this.periodic = false;
     }
 
     /// Rearm a stopped timer
-    public void rearm (Duration timeout, bool periodic) nothrow
+    public void rearm (Duration timeout, bool periodic)
     {
         this.timeout = timeout;
         this.periodic = periodic;
@@ -600,7 +600,7 @@ public final class Timer
     }
 
     /// True if timer is yet to fire
-    @property bool pending () nothrow
+    @property bool pending ()
     {
         return this._pending;
     }
