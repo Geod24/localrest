@@ -502,7 +502,7 @@ public void sleep (Duration timeout) nothrow
 
 *******************************************************************************/
 
-public Timer setTimer (Duration timeout, void delegate() dg,
+public Timer setTimer (Duration timeout, void delegate() @safe nothrow dg,
     bool periodic = false) nothrow
 {
     assert(scheduler !is null, "Cannot call this delegate from the main thread");
@@ -526,7 +526,7 @@ public Timer setTimer (Duration timeout, void delegate() dg,
 
 *******************************************************************************/
 
-public Timer createTimer (void delegate() dg) nothrow
+public Timer createTimer (void delegate() @safe nothrow dg) nothrow
 {
     assert(dg !is null, "Cannot call this delegate if null");
     return new Timer(dg);
@@ -536,7 +536,7 @@ public Timer createTimer (void delegate() dg) nothrow
 public final class Timer
 {
     private Duration timeout;
-    private void delegate () dg;
+    private void delegate () @safe nothrow dg;
     // Whether this timer is repeating
     private bool periodic;
     // Whether this timer was stopped
@@ -546,14 +546,15 @@ public final class Timer
     // Whether this timer is waiting for timeout
     private bool _pending;
 
-    public this (void delegate() dg) @safe nothrow
+    @safe:
+    public this (void delegate() @safe nothrow dg) nothrow
     {
         this.dg = dg;
         this.stopped = true;
     }
 
     // Run a delegate after timeout, and until this.periodic is false
-    private void run ()
+    private void run () nothrow
     {
         scope (exit)
         {
@@ -563,7 +564,10 @@ public final class Timer
         do
         {
             this._pending = true;
-            sleep(timeout);
+            () @trusted
+            {
+                sleep(timeout);
+            } ();
             this._pending = false;
             if (this.stopped)
                 return;
@@ -573,7 +577,7 @@ public final class Timer
 
     /// Stop the timer. The next time this timer's fiber wakes up
     /// it will exit the run() function.
-    public void stop () @safe nothrow
+    public void stop () nothrow
     {
         this.stopped = true;
         this.periodic = false;
@@ -588,12 +592,15 @@ public final class Timer
         if (!this.running)
         {
             this.running = true;
-            scheduler.schedule(&run);
+            () @trusted
+            {
+                scheduler.schedule(&run);
+            } ();
         }
     }
 
     /// True if timer is yet to fire
-    @property bool pending () @safe nothrow
+    @property bool pending () nothrow
     {
         return this._pending;
     }
@@ -2382,7 +2389,7 @@ unittest
             this.timer.rearm(0.msecs, false);
         }
 
-        public void callback ()
+        public void callback () @safe nothrow
         {
             this.counter++;
             if (this.counter == 3)
