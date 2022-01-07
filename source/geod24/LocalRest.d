@@ -742,7 +742,7 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
                                 node.%1$s(args.args);
                             res.status = Status.Success;
                         }
-                        catch (Exception e)
+                        catch (Throwable e)
                         {
                             res.status = Status.ClientFailed;
                             res.data = SerializedData(e.toString());
