@@ -171,6 +171,25 @@ public class FiberScheduler
     }
 
     /**
+     * Shut down any running fiber and return from the event loop
+     */
+    public void stop ()
+    {
+        while (!this.readyq.empty())
+        {
+            auto fiber = this.readyq.front();
+            this.readyq.removeFront();
+            this.releaseResources(fiber);
+        }
+        while (!this.wait_list.empty())
+        {
+            auto fiber = this.wait_list.front();
+            this.wait_list.removeFront();
+            this.releaseResources(fiber);
+        }
+    }
+
+    /**
      * This created a new Fiber for the supplied op and adds it to the
      * dispatch list.
      */
