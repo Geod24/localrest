@@ -545,12 +545,15 @@ public final class Timer
     private bool running;
     // Whether this timer is waiting for timeout
     private bool _pending;
+    // Whether this timer is rearmed in its handler
+    private bool rearmed;
 
     @safe nothrow:
     public this (void delegate() @safe nothrow dg)
     {
         this.dg = dg;
         this.stopped = true;
+        this.rearmed = false;
     }
 
     // Run a delegate after timeout, and until this.periodic is false
@@ -563,6 +566,7 @@ public final class Timer
         }
         do
         {
+            this.rearmed = false;
             this._pending = true;
             () @trusted
             {
@@ -572,7 +576,7 @@ public final class Timer
             if (this.stopped)
                 return;
             dg();
-        } while (this.periodic);
+        } while (this.periodic || this.rearmed);
     }
 
     /// Stop the timer. The next time this timer's fiber wakes up
@@ -583,7 +587,7 @@ public final class Timer
         this.periodic = false;
     }
 
-    /// Rearm a stopped timer
+    /// Rearm a timer
     public void rearm (Duration timeout, bool periodic)
     {
         this.timeout = timeout;
@@ -597,6 +601,8 @@ public final class Timer
                 scheduler.schedule(&run);
             } ();
         }
+        else
+            this.rearmed = true;
     }
 
     /// True if timer is yet to fire
