@@ -631,6 +631,25 @@ public struct Listener (API)
     package BindChn data;
 }
 
+/// Helper template to allow default parameters to work
+private template ParamsRef (alias Func)
+{
+    import std.meta : EraseAll;
+    import std.traits : ParameterDefaults;
+
+    /// All of the function parameters
+    private alias All = Parameters!Func;
+
+    /// Default parameters matching `Optional`
+    private enum Default = EraseAll!(void, ParameterDefaults!Func);
+
+    /// Only parameters that don't have a default
+    private alias Required = All[0 .. $ - Default.length];
+
+    /// Parameters with a default value
+    private alias Optional = All[$ - Default.length .. $];
+}
+
 /*******************************************************************************
 
     A reference to an alread-instantiated node
@@ -1221,13 +1240,14 @@ public final class RemoteAPI (API, alias S = VibeJSONSerializer!()) : API
         static foreach (ovrld; __traits(getOverloads, API, member))
         {
             mixin(q{
-                override ReturnType!(ovrld) } ~ member ~ q{ (Parameters!ovrld params)
+                    override ReturnType!(ovrld) } ~ member ~ q{ (
+                        ParamsRef!(ovrld).Required required,
+                        ParamsRef!(ovrld).Optional optional = ParamsRef!(ovrld).Default)
                 {
-
                     // `geod24.concurrency.send/receive[Only]` is not `@safe` but
                     // this overload needs to be
                     auto res = () @trusted {
-                        auto serialized = S.serialize(ArgWrapper!(Parameters!ovrld)(params));
+                        auto serialized = S.serialize(ArgWrapper!(Parameters!ovrld)(required, optional));
                         auto command = Command(this.conn.getNextCommandId(), ovrld.mangleof, SerializedData(serialized));
 
                         if(!this.conn.sendCommand(command))
@@ -2712,4 +2732,58 @@ unittest
 
     atomicStore(node1Addr, node1.ctrl.listener());
     node1.call0();
+}
+
+// Make sure default parameters work correctly
+unittest
+{
+    static interface API
+    {
+        public uint call1 (uint value = 69) @safe;
+        public size_t call2 (string required, string optional = "Hello world") @safe;
+        public size_t call3 (string file = __FILE__, uint line = __LINE__) @safe; // L2744
+    }
+
+    static class Node : API
+    {
+        public override uint call1 (uint value) @safe
+        {
+            return value;
+        }
+
+        public override size_t call2 (string required, string optional) @safe
+        {
+            return required.length + optional.length;
+        }
+
+        public override size_t call3 (string file, uint line) @safe
+        {
+            // Test disabled. With LDC v1.28.1 installed with Homebrew on MacOS,
+            // the defaults I got were:
+            // file: "/usr/local/opt/dmd/include/dlang/dmd/std/traits.d"
+            // line: 1444
+            return file.length + line;
+        }
+    }
+
+    auto node1 = RemoteAPI!API.spawn!Node();
+    scope (exit)
+    {
+        node1.ctrl.shutdown();
+        thread_joinAll();
+    }
+
+    assert(node1.call1() == 69);
+    assert(node1.call1(42) == 42);
+    assert(node1.call2("WYSIWYG") == "WYSIWYG".length + "Hello World".length);
+    assert(node1.call2("WYSIWYG", null) == "WYSIWYG".length);
+    version (none)
+    {
+        // Does not work! There are various issues.
+        // First, https://issues.dlang.org/show_bug.cgi?id=18919 means we'd probably
+        // get the wrong line. But worse, because of `std.traits` eagerly interpreting
+        // the default (e.g. see https://issues.dlang.org/show_bug.cgi?id=14369),
+        // the `__FILE__` we get is actually... std.traits! And the line to match.
+        assert(node1.call3() == __FILE__.length + __LINE__);
+    }
 }
