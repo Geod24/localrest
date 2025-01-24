@@ -1676,7 +1676,7 @@ unittest
     assert(current2 - current1 < 200.msecs);
 
     // Make one of the node sleep
-    n1.sleep(1.seconds);
+    n1.sleep(1300.msecs);
     // Make sure our main thread is not suspended,
     // nor is the second node
     assert(2 == n2.call());
